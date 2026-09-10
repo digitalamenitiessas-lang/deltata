@@ -1,36 +1,50 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Del Tata — Sistema de gestión
 
-## Getting Started
+Ventas, caja y stock del foodtruck **Del Tata — Empanadas Tucumanas**. PWA
+offline-first: la venta nunca espera al servidor.
 
-First, run the development server:
+## Cómo funciona
+
+- **Local primero**: toda operación (venta, apertura/cierre de caja, gasto,
+  conteo, merma) se escribe en IndexedDB (Dexie) y se encola en un *outbox*
+  dentro de la misma transacción.
+- **Sincronización**: el outbox se empuja FIFO a `/api/sync`, que ejecuta el
+  RPC `sync_op` en Supabase. Idempotente por UUID: reintentar jamás duplica.
+- **Stock como ledger**: cada movimiento guarda `balance_after`; un trigger
+  mantiene `products.current_qty` en el servidor.
+- **Seguridad**: RLS habilitada sin políticas — solo el server (service role)
+  escribe. La clave vive en `.env.local` / variables de Vercel, nunca en el
+  cliente.
+
+## Reglas de negocio clave (ver los MD en la carpeta padre)
+
+- Sin caja abierta no se vende.
+- Cierre de caja y conteo de stock **a ciegas**: primero lo físico, después el
+  esperado. Diferencias grandes exigen nota.
+- El cierre es inmutable; las correcciones son ajustes.
+- `qty` siempre en unidades (la docena existe solo en la UI, como descuento).
+- Costo o mínimo sin cargar se muestra como "no cargado", nunca como `$0`.
+
+## Desarrollo
 
 ```bash
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Variables en `.env.local`:
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```
+NEXT_PUBLIC_SUPABASE_URL=...
+SUPABASE_SERVICE_ROLE_KEY=...
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Migraciones SQL en `supabase/migrations/` (aplicadas al proyecto
+`rjqvpbdoqozvtlgoezpt`).
 
-## Learn More
+## Pendientes conocidos
 
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- Autenticación real (hoy: perfil local nombre + rol, sin validación server).
+- Precios del seed son de referencia: ajustarlos en **Configuración**.
+- Lotes/vencimientos, anomalías avanzadas y capa de IA: fases siguientes del
+  roadmap (los datos ya quedan registrados para alimentarlas).

@@ -39,3 +39,9 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# configuración local de herramientas: acá pueden terminar tokens de acceso
+.claude/
+
+# duplicados que genera Finder ("page 2.tsx"): copias viejas, no código vivo
+* 2.*

@@ -1,26 +1,128 @@
 @import "tailwindcss";
 
+/* ─── Tokens Del Tata — tradición tucumana convertida en food-tech ─── */
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  /* Marca */
+  --brand-950: #07351a;
+  --brand-900: #0b4723;
+  --brand-800: #155a31;
+  --brand-700: #246f43;
+  --brand-100: #dcebdd;
+  --brand-050: #eef6ef;
+
+  /* Neutros cálidos */
+  --cream-050: #fffdf7;
+  --cream-100: #f7f1e4;
+  --cream-200: #eee3cf;
+  --dough-300: #dfc191;
+  --wood-700: #765235;
+
+  /* Acentos */
+  --gold-500: #d7a23b;
+  --terracotta-500: #c96b3b;
+
+  /* Texto */
+  --ink-950: #172019;
+  --ink-700: #465249;
+  --ink-500: #6d786f;
+  --ink-inverse: #fffdf7;
+
+  /* Semánticos */
+  --success-600: #24814c;
+  --warning-600: #b87711;
+  --danger-600: #b9443d;
+  --info-600: #356c91;
+
+  /* Superficies */
+  --surface-app: #f7f1e4;
+  --surface-card: #fffdf7;
+  --surface-elevated: #ffffff;
+  --border-soft: rgba(11, 71, 35, 0.12);
+  --border-strong: rgba(11, 71, 35, 0.24);
+
+  /* Movimiento */
+  --motion-fast: 120ms;
+  --motion-base: 180ms;
+  --motion-slow: 260ms;
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --color-brand-950: var(--brand-950);
+  --color-brand-900: var(--brand-900);
+  --color-brand-800: var(--brand-800);
+  --color-brand-700: var(--brand-700);
+  --color-brand-100: var(--brand-100);
+  --color-brand-050: var(--brand-050);
+  --color-cream-050: var(--cream-050);
+  --color-cream-100: var(--cream-100);
+  --color-cream-200: var(--cream-200);
+  --color-dough-300: var(--dough-300);
+  --color-wood-700: var(--wood-700);
+  --color-gold-500: var(--gold-500);
+  --color-terracotta-500: var(--terracotta-500);
+  --color-ink-950: var(--ink-950);
+  --color-ink-700: var(--ink-700);
+  --color-ink-500: var(--ink-500);
+  --color-ink-inverse: var(--ink-inverse);
+  --color-success-600: var(--success-600);
+  --color-warning-600: var(--warning-600);
+  --color-danger-600: var(--danger-600);
+  --color-info-600: var(--info-600);
+  --color-surface-app: var(--surface-app);
+  --color-surface-card: var(--surface-card);
+  --color-surface-elevated: var(--surface-elevated);
+  --font-display: var(--font-fraunces), serif;
+  --font-sans: var(--font-manrope), system-ui, sans-serif;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+html {
+  background: var(--surface-app);
+  color: var(--ink-950);
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-manrope), system-ui, sans-serif;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Cifras siempre tabulares */
+.tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Repulgue: separador inspirado en el borde de la empanada */
+.repulgue {
+  height: 8px;
+  background-image: radial-gradient(
+    circle at 6px -2px,
+    transparent 5px,
+    var(--border-soft) 5px,
+    var(--border-soft) 6px,
+    transparent 7px
+  );
+  background-size: 12px 8px;
+  background-repeat: repeat-x;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes slideUp {
+  from { transform: translateY(24px); opacity: 0.6; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+button {
+  touch-action: manipulation;
 }
