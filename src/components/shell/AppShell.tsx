@@ -26,6 +26,7 @@ import { useUI } from "@/stores/ui";
 import { ensureSeeded } from "@/lib/seed";
 import { startSyncEngine, pullCatalog } from "@/lib/sync/engine";
 import { ConnectionStatus } from "./ConnectionStatus";
+import { BotonAyuda } from "./Ayuda";
 import { Button } from "@/components/ui/Button";
 
 const NAV = [
@@ -205,6 +206,7 @@ export function PageHeader({
         <div className="flex shrink-0 items-center gap-2">
           {action}
           <ConnectionStatus />
+          <BotonAyuda />
         </div>
       </div>
     </header>
