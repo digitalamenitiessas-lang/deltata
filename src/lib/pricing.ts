@@ -51,6 +51,22 @@ export function tarifaDe(
 
 export interface CartLine extends SaleItem {
   kind: Product["kind"];
+  /** cocidas: en qué grupo de `grupos` se armó su precio; congeladas: null */
+  grupo: number | null;
+}
+
+/**
+ * Líneas cocidas que se cobran juntas por tramos.
+ *
+ * Las empanadas que comparten tarifa forman un solo grupo, sin importar el
+ * gusto: "hasta 5 empanadas, después de media docena baja" habla del total
+ * del pedido, y la docena surtida es lo normal. El resto de los productos va
+ * cada uno en su grupo.
+ */
+export interface GrupoTramos {
+  /** claves de las líneas que lo forman, en el orden del pedido */
+  claves: string[];
+  unidades: number;
   /** cómo se armó el precio: docenas, medias y sueltas */
   desglose: Desglose;
   /** cuántas faltan para que convenga el tramo siguiente */
@@ -59,6 +75,7 @@ export interface CartLine extends SaleItem {
 
 export interface CartComputation {
   lines: CartLine[];
+  grupos: GrupoTramos[];
   /** lo que saldría sin tramos: sirve para mostrar cuánto se ahorró */
   sinTramos: number;
   ahorroTramos: number;
@@ -74,8 +91,11 @@ export interface CartComputation {
 /**
  * Precio del pedido, con los tramos del canal activo.
  *
- * - Cocidas: se arma el combo más barato entre docenas, medias y sueltas.
- *   6 salen $12.000 y no 6 × $2.500; 14 salen 1 docena + 2 sueltas.
+ * - Cocidas: se arma el combo más barato entre docenas, medias y sueltas
+ *   sobre el TOTAL de empanadas que comparten tarifa, no gusto por gusto.
+ *   6 surtidas salen $12.000 igual que 6 de carne; 14 salen 1 docena + 2
+ *   sueltas. El total del grupo se reparte entre sus gustos según cuántas
+ *   lleva cada uno, así cada línea de la venta sigue sumando lo que se cobró.
  * - Congeladas: ya se venden por docena, así que van a su propio precio.
  *
  * Las promos entran DESPUÉS de los tramos y sobre el precio ya rebajado, para
@@ -95,6 +115,10 @@ export function computeCart(
   const lines: CartLine[] = [];
   let sinTramos = 0;
 
+  // Primero se juntan las cocidas por tarifa; el precio sale después, cuando
+  // ya se sabe cuántas hay en total de cada grupo.
+  const armado: { clave: string; tarifa: Tarifa; lineas: CartLine[] }[] = [];
+
   for (const [clave, qty] of Object.entries(quantities)) {
     if (qty <= 0) continue;
     const { productId, presentacion } = partirClave(clave);
@@ -104,8 +128,7 @@ export function computeCart(
 
     if (presentacion === "congelada") {
       if (tarifa.congelada == null) continue;
-      const docenas = qty / UNIDADES_POR_DOCENA;
-      const total = docenas * tarifa.congelada;
+      const total = (qty / UNIDADES_POR_DOCENA) * tarifa.congelada;
       sinTramos += total;
       lines.push({
         product_id: product.id,
@@ -115,29 +138,70 @@ export function computeCart(
         line_total: total,
         presentacion,
         kind: product.kind,
-        desglose: { docenas, medias: 0, sueltas: 0, total },
-        sugerencia: null,
+        grupo: null,
       });
-    } else {
-      const desglose = calcularTramos(qty, tarifa);
-      sinTramos += qty * tarifa.unidad;
-      lines.push({
-        product_id: product.id,
-        product_name: product.name,
-        qty,
-        unit_price: desglose.total / qty,
-        line_total: desglose.total,
-        presentacion: "cocida",
-        kind: product.kind,
-        desglose,
-        // Sólo tiene sentido sugerir en empanadas con tramos cargados
-        sugerencia:
-          tarifa.media != null || tarifa.docena != null
-            ? sugerirTramo(qty, tarifa)
-            : null,
-      });
+      continue;
     }
+
+    sinTramos += qty * tarifa.unidad;
+    const linea: CartLine = {
+      product_id: product.id,
+      product_name: product.name,
+      qty,
+      unit_price: 0,
+      line_total: 0,
+      presentacion: "cocida",
+      kind: product.kind,
+      grupo: null,
+    };
+    lines.push(linea);
+
+    // Sólo las empanadas se juntan entre gustos: una bebida con precio por
+    // pack no tiene por qué sumar para la docena de empanadas.
+    const claveGrupo =
+      product.kind === "empanada"
+        ? `empanada|${tarifa.unidad}|${tarifa.media ?? ""}|${tarifa.docena ?? ""}`
+        : clave;
+    let g = armado.find((a) => a.clave === claveGrupo);
+    if (!g) {
+      g = { clave: claveGrupo, tarifa, lineas: [] };
+      armado.push(g);
+    }
+    g.lineas.push(linea);
   }
+
+  const grupos: GrupoTramos[] = armado.map((g, indice) => {
+    const unidades = g.lineas.reduce((acc, l) => acc + l.qty, 0);
+    const desglose = calcularTramos(unidades, g.tarifa);
+
+    // Reparto proporcional a las unidades, redondeando sobre lo acumulado:
+    // cada línea queda a menos de $1 de su parte exacta y la última cierra
+    // justo con el total del grupo.
+    let acumuladas = 0;
+    let asignado = 0;
+    for (const l of g.lineas) {
+      acumuladas += l.qty;
+      const hasta =
+        acumuladas === unidades
+          ? desglose.total
+          : Math.round((desglose.total * acumuladas) / unidades);
+      l.line_total = hasta - asignado;
+      l.unit_price = l.line_total / l.qty;
+      l.grupo = indice;
+      asignado = hasta;
+    }
+
+    return {
+      claves: g.lineas.map((l) => claveLinea(l.product_id, l.presentacion)),
+      unidades,
+      desglose,
+      // Sólo tiene sentido sugerir con tramos cargados
+      sugerencia:
+        g.tarifa.media != null || g.tarifa.docena != null
+          ? sugerirTramo(unidades, g.tarifa)
+          : null,
+    };
+  });
 
   const subtotalTramos = lines.reduce((acc, l) => acc + l.line_total, 0);
 
@@ -164,6 +228,7 @@ export function computeCart(
 
   return {
     lines,
+    grupos,
     sinTramos,
     ahorroTramos: Math.max(0, sinTramos - subtotalTramos),
     promos: aplicadas,

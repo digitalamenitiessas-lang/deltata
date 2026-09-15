@@ -23,6 +23,9 @@ export function CartSheet({ open, onOpenChange, cart, onCheckout }: Props) {
     useCart();
   // El descuento a mano lo autoriza el dueño: el ahorro por tramos ya sale solo
   const admin = esAdmin(useSesion((s) => s.usuario));
+  // Con un solo gusto el armado se lee debajo de la línea; si son varios
+  // gustos juntos, la media docena y la docena son del pedido y van aparte.
+  const surtidos = cart.grupos.filter((g) => g.claves.length > 1);
 
   return (
     <Sheet open={open} onOpenChange={onOpenChange} title="Pedido actual">
@@ -36,6 +39,9 @@ export function CartSheet({ open, onOpenChange, cart, onCheckout }: Props) {
               const paso = congelada ? UNIDADES_POR_DOCENA : 1;
               const k = claveLinea(line.product_id, line.presentacion);
               const actual = quantities[k] ?? 0;
+              const docenas = line.qty / UNIDADES_POR_DOCENA;
+              const grupo = line.grupo != null ? cart.grupos[line.grupo] : null;
+              const solo = grupo != null && grupo.claves.length === 1;
               return (
                 <li key={k} className="flex items-center gap-2 py-2">
                   <div className="min-w-0 flex-1">
@@ -51,14 +57,16 @@ export function CartSheet({ open, onOpenChange, cart, onCheckout }: Props) {
                     </p>
                     <p className="tnum text-xs text-ink-700">
                       {congelada
-                        ? `${line.desglose.docenas} ${line.desglose.docenas === 1 ? "docena" : "docenas"} · ${line.qty} u.`
-                        : `${line.qty} u. · ${describirDesglose(line.desglose)}`}
+                        ? `${docenas} ${docenas === 1 ? "docena" : "docenas"} · ${line.qty} u.`
+                        : solo
+                          ? `${line.qty} u. · ${describirDesglose(grupo.desglose)}`
+                          : `${line.qty} u.`}
                     </p>
-                    {line.sugerencia ? (
+                    {solo && grupo.sugerencia ? (
                       <p className="mt-0.5 flex items-center gap-1 text-[0.7rem] font-bold text-success-600">
                         <TrendingDown size={11} aria-hidden />
-                        Con {line.sugerencia.faltan} más:{" "}
-                        {formatARS(line.sugerencia.nuevoTotal)}
+                        Con {grupo.sugerencia.faltan} más:{" "}
+                        {formatARS(grupo.sugerencia.nuevoTotal)}
                       </p>
                     ) : null}
                   </div>
@@ -74,7 +82,7 @@ export function CartSheet({ open, onOpenChange, cart, onCheckout }: Props) {
                       <Minus size={16} />
                     </button>
                     <span className="tnum w-8 text-center text-base font-bold">
-                      {congelada ? line.desglose.docenas : line.qty}
+                      {congelada ? docenas : line.qty}
                     </span>
                     <button
                       type="button"
@@ -94,6 +102,33 @@ export function CartSheet({ open, onOpenChange, cart, onCheckout }: Props) {
               );
             })}
           </ul>
+
+          {/* La docena surtida: se arma con todos los gustos juntos */}
+          {surtidos.map((g) => (
+            <div
+              key={g.claves.join(",")}
+              className="rounded-xl border border-[var(--border-soft)] bg-cream-100 px-3 py-2"
+            >
+              <div className="flex items-baseline justify-between gap-2">
+                <p className="tnum text-sm font-bold text-ink-950">
+                  {g.unidades} surtidas · {describirDesglose(g.desglose)}
+                </p>
+                <p className="tnum text-sm font-bold text-ink-950">
+                  {formatARS(g.desglose.total)}
+                </p>
+              </div>
+              <p className="text-xs text-ink-700">
+                La media docena y la docena cuentan todos los gustos juntos.
+              </p>
+              {g.sugerencia ? (
+                <p className="mt-0.5 flex items-center gap-1 text-[0.7rem] font-bold text-success-600">
+                  <TrendingDown size={11} aria-hidden />
+                  Con {g.sugerencia.faltan} más, de cualquier gusto:{" "}
+                  {formatARS(g.sugerencia.nuevoTotal)}
+                </p>
+              ) : null}
+            </div>
+          ))}
 
           <div className="repulgue" aria-hidden />
 

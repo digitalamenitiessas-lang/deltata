@@ -304,9 +304,7 @@ export async function recordSale(input: {
     cash_received: input.cash_received ?? null,
     sold_by: input.sold_by,
     note: input.note ?? null,
-    items: cart.lines.map(
-      ({ kind: _k, desglose: _de, sugerencia: _su, ...item }) => item
-    ),
+    items: cart.lines.map(({ kind: _k, grupo: _g, ...item }) => item),
   };
 
   await db.transaction(

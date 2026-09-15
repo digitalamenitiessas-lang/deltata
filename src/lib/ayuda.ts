@@ -102,7 +102,7 @@ const AYUDAS: Record<string, Ayuda> = {
     titulo: "Vender",
     etapa: "vender",
     queEs:
-      "Acá se registra cada venta. El precio lo calcula el sistema: media docena, docena y promos se aplican solas, y el stock se descuenta en el momento.",
+      "Acá se registra cada venta. El precio lo calcula el sistema: media docena, docena y promos se aplican solas, y el stock se descuenta en el momento. La docena se arma con todas las empanadas del pedido, sin importar el gusto.",
     pasos: [
       {
         t: "Elegí el lugar",
@@ -118,11 +118,11 @@ const AYUDAS: Record<string, Ayuda> = {
       },
       {
         t: "Armá el pedido",
-        d: "Cada toque en un gusto suma una unidad (en congeladas, una docena). Con “−” restás. Mantené apretada la tarjeta para elegir una cantidad exacta.",
+        d: "Cada toque en un gusto suma una unidad (en congeladas, una docena). Con “−” restás. Mantené apretada la tarjeta para elegir una cantidad exacta. Mezclá gustos sin problema: 4 de carne + 4 de pollo + 4 de humita se cobran como una docena.",
       },
       {
         t: "Revisá el total",
-        d: "La barra verde de abajo muestra unidades, ahorro y total. “Ver pedido” abre el detalle: cómo se armó el precio, qué promo entró y si con unas pocas más conviene el tramo siguiente.",
+        d: "La barra verde de abajo muestra unidades, ahorro y total. “Ver pedido” abre el detalle: cómo se armó el precio (si hay varios gustos, la docena surtida aparece debajo de la lista), qué promo entró y si con unas pocas más conviene el tramo siguiente.",
       },
       {
         t: "Cobrá",
@@ -518,6 +518,9 @@ const AYUDAS: Record<string, Ayuda> = {
     ],
     ojo: [
       { t: "Un precio vacío significa “no hay ese tramo”, nunca $0." },
+      {
+        t: "La media docena y la docena se cobran sobre el total de empanadas cocidas del pedido, mezclando gustos. Si a un gusto le ponés otro precio, arma su propia docena aparte.",
+      },
       {
         t: "Las promos se calculan sobre el precio que ya tiene el pedido con media docena y docena, y nunca suben el precio.",
       },

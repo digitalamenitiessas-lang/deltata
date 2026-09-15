@@ -94,11 +94,19 @@ export function textoRecibo(sale: Sale, opts: OpcionesRecibo = {}): string {
   // lista y el ahorro, no un total que no puede explicar.
   if (sale.discount > 0) {
     l.push(`Precio de lista: ${formatARS(sale.subtotal)}`);
+    // Las líneas ya vienen con la media docena y la docena, que se arman sobre
+    // todas las empanadas del pedido (la docena surtida también). Lo que falta
+    // hasta el precio de lista es ese ahorro; no es un descuento a mano.
+    const conTramos = sale.items.reduce((a, i) => a + i.line_total, 0);
+    const porTramos = Math.max(0, sale.subtotal - conTramos);
+    if (porTramos > 0.5) {
+      l.push(`Precio por media docena y docena: −${formatARS(porTramos)}`);
+    }
     for (const promo of sale.promos ?? []) {
       l.push(`${promo.nombre}: −${formatARS(promo.ahorro)}`);
     }
-    const otros = sale.discount - (sale.promo_discount ?? 0);
-    if (otros > 0.5) l.push(`Descuento: −${formatARS(otros)}`);
+    const aMano = sale.discount - (sale.promo_discount ?? 0) - porTramos;
+    if (aMano > 0.5) l.push(`Descuento: −${formatARS(aMano)}`);
   }
 
   l.push(`*TOTAL: ${formatARS(sale.total)}*`);

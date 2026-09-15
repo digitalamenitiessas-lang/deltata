@@ -37,7 +37,7 @@ const MODULOS: Modulo[] = [
     queHace:
       "Registra cada venta y descuenta el stock solo. Arriba elegís si van cocidas (por unidad) o congeladas (por docena); tocás los gustos, elegís cómo pagan y listo. Si el cliente pide el recibo, después de cobrar aparece el botón para mandárselo por WhatsApp.",
     cuando: "Todo el tiempo, mientras hay gente.",
-    ojo: "Cocidas y congeladas son las mismas empanadas y el mismo stock: cambia el precio, no el pozo. Un pedido puede llevar las dos cosas del mismo gusto. Y si juntás 12 cocidas del mismo precio, el descuento por docena se aplica solo.",
+    ojo: "Cocidas y congeladas son las mismas empanadas y el mismo stock: cambia el precio, no el pozo. Un pedido puede llevar las dos cosas del mismo gusto. La media docena y la docena se arman con todas las cocidas del pedido, sin importar el gusto: 6 surtidas salen lo mismo que 6 de carne, y 14 son una docena + 2 sueltas. Si un gusto tiene otro precio, arma su propia docena aparte.",
     soloAdmin: false,
   },
   {
