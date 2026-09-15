@@ -438,7 +438,7 @@ const AYUDAS: Record<string, Ayuda> = {
     queEs:
       "Todo lo que pasó en el sistema, desde cualquier teléfono, con quién lo hizo y cuándo. No se puede borrar ni editar.",
     pasos: [
-      { t: "Filtrá", d: "Por tipo de acción o por persona." },
+      { t: "Filtrá", d: "Por fecha, por tipo de trámite (venta, cierre de caja, merma, cambio de precio…) o por persona." },
       {
         t: "Mirá primero lo destacado",
         d: "Mermas, ajustes, descuentos y cambios de precio: son los movimientos que pueden tapar un faltante.",
@@ -446,6 +446,10 @@ const AYUDAS: Record<string, Ayuda> = {
       {
         t: "Ventas “a revisar”",
         d: "Si una venta declaró un descuento de promo que no se pudo verificar, aparece marcada con ⚠.",
+      },
+      {
+        t: "Que te llegue al celular",
+        d: "Con las notificaciones activadas (la campana debajo del título, o Más → Notificaciones) te avisa al momento los cierres de caja, las mermas, los gastos, los conteos que no cuadran y las ventas a revisar que haga otra persona.",
       },
     ],
   },
@@ -549,8 +553,13 @@ const AYUDAS: Record<string, Ayuda> = {
         d: "Si quedan operaciones sin subir, te avisa antes. Se suben cuando alguien vuelva a entrar en ese teléfono.",
       },
       {
+        t: "Notificaciones",
+        d: "Activalas en cada celular o compu donde quieras recibir los avisos (cierres de caja, mermas, gastos, ventas a revisar). “Mandar una de prueba” confirma que llegan.",
+        soloDueno: true,
+      },
+      {
         t: "Instalar en el iPhone",
-        d: "En Safari: Compartir → “Agregar a pantalla de inicio”. Instalada anda a pantalla completa y más rápido.",
+        d: "En Safari: Compartir → “Agregar a pantalla de inicio”. Instalada anda a pantalla completa y más rápido, y es la única forma de recibir notificaciones en el iPhone.",
       },
     ],
   },

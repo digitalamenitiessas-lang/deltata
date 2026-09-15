@@ -1,4 +1,4 @@
-// Service worker Del Tata — app shell disponible offline.
+// Service worker Del Tata — app shell disponible offline y notificaciones push.
 // Estrategia: navegación network-first con fallback a caché (la app es local-
 // first: los datos viven en IndexedDB, acá sólo se cachea el shell y estáticos).
 
@@ -66,5 +66,52 @@ self.addEventListener("fetch", (event) => {
           return res;
         })
     )
+  );
+});
+
+// ── Notificaciones push ─────────────────────────────────────────────────────
+// El servidor manda { titulo, cuerpo, url, tag } cifrado; el navegador ya lo
+// entrega descifrado. Siempre se muestra algo: iOS corta los avisos de un
+// sitio que recibe push y no muestra la notificación.
+self.addEventListener("push", (event) => {
+  let datos = {};
+  try {
+    datos = event.data ? event.data.json() : {};
+  } catch {
+    datos = { cuerpo: event.data ? event.data.text() : "" };
+  }
+  event.waitUntil(
+    self.registration.showNotification(datos.titulo || "Del Tata", {
+      body: datos.cuerpo || "",
+      icon: "/icon-192.png",
+      badge: "/icon-192.png",
+      lang: "es-AR",
+      // Misma etiqueta = reemplaza al aviso anterior (apertura → cierre de caja)
+      tag: datos.tag || undefined,
+      renotify: Boolean(datos.tag),
+      data: { url: datos.url || "/auditoria" },
+    })
+  );
+});
+
+// Tocar el aviso abre la pantalla que corresponde, reusando la app si ya
+// estaba abierta en vez de abrir otra ventana.
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const destino = new URL(
+    (event.notification.data && event.notification.data.url) || "/auditoria",
+    self.location.origin
+  ).href;
+  event.waitUntil(
+    self.clients
+      .matchAll({ type: "window", includeUncontrolled: true })
+      .then((ventanas) => {
+        const propia = ventanas.find((v) => new URL(v.url).origin === self.location.origin);
+        if (!propia) return self.clients.openWindow(destino);
+        return propia
+          .focus()
+          .then((v) => (v && "navigate" in v ? v.navigate(destino) : v))
+          .catch(() => self.clients.openWindow(destino));
+      })
   );
 });

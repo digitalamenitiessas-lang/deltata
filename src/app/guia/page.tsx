@@ -95,9 +95,9 @@ const MODULOS: Modulo[] = [
     icon: ShieldCheck,
     nombre: "Auditoría",
     queHace:
-      "Todo lo que pasó, con nombre y hora: ventas, mermas, ajustes, cambios de precio, cierres. No se puede borrar.",
+      "Todo lo que pasó, con nombre y hora: ventas, mermas, ajustes, cambios de precio, cierres. Se filtra por tipo de trámite y por persona. No se puede borrar.",
     cuando: "Cuando algo no cierra y querés saber qué pasó.",
-    ojo: "Arriba de todo destaca lo que puede tapar un faltante: mermas, ajustes y cambios de precio. Son los que conviene mirar primero.",
+    ojo: "Arriba de todo destaca lo que puede tapar un faltante: mermas, ajustes y cambios de precio. Son los que conviene mirar primero. Y con las notificaciones activadas (la campana debajo del título) los cierres de caja, mermas, gastos y ventas a revisar te llegan al celular o a la compu en el momento, sin abrir la app. En el iPhone hace falta tener Del Tata instalada en la pantalla de inicio.",
     soloAdmin: true,
   },
   {

@@ -1,6 +1,7 @@
-import { NextResponse } from "next/server";
+import { NextResponse, after } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase-server";
 import { getSesion, type Sesion } from "@/lib/auth/server";
+import { avisoPara, avisarADuenos, type Aviso } from "@/lib/avisos";
 
 export const dynamic = "force-dynamic";
 
@@ -178,6 +179,42 @@ async function vetarPromos(
   return sospechas.length > 0 ? { sospecha: sospechas.join("; ") } : {};
 }
 
+/**
+ * Operaciones que nacen con un id propio y pasan una sola vez: si su id ya
+ * está en el rastro, es un reintento. (Guardar un cliente no entra: editarlo
+ * después reusa el mismo id y es un movimiento nuevo de verdad.)
+ */
+const OPERACIONES_UNICAS = new Set([
+  "sale",
+  "expense",
+  "stock_move",
+  "stock_count",
+  "customer_payment",
+  "open_cash",
+  "close_cash",
+]);
+
+async function yaAuditada(
+  supabase: ReturnType<typeof supabaseAdmin>,
+  kind: string,
+  accion: string,
+  id: unknown
+): Promise<boolean> {
+  if (!OPERACIONES_UNICAS.has(kind) || id == null || id === "") return false;
+  // Una venta puede entrar como "venta" y reintentarse como "venta_a_revisar"
+  // (por ejemplo, si la promo se borró en el medio): es la misma venta.
+  const acciones = kind === "sale" ? ["venta", "venta_a_revisar"] : [accion];
+  const { data, error } = await supabase
+    .from("audit_log")
+    .select("id")
+    .eq("entidad_id", String(id))
+    .in("accion", acciones)
+    .limit(1);
+  // Ante la duda se registra: mejor una línea repetida que una perdida
+  if (error) return false;
+  return (data?.length ?? 0) > 0;
+}
+
 /** Cómo se lee cada operación en el rastro de auditoría. */
 function describir(
   kind: string,
@@ -297,6 +334,7 @@ export async function POST(req: Request) {
   const supabase = supabaseAdmin();
   const dispositivo = req.headers.get("user-agent")?.slice(0, 180) ?? null;
   const results: { id: number; ok: boolean; error?: string }[] = [];
+  const avisos: Aviso[] = [];
 
   for (const op of ops) {
     // El rol se valida acá, en el servidor: ocultar el botón no alcanza.
@@ -342,7 +380,11 @@ export async function POST(req: Request) {
     }
 
     const d = describir(op.kind, op.payload, sospecha);
-    if (d) {
+    // Si se cortó la señal antes de la respuesta, el dispositivo reintenta la
+    // tanda entera. sync_op no duplica lo que ya entró; el rastro y los
+    // avisos tampoco tienen que hacerlo.
+    const repetida = d != null && (await yaAuditada(supabase, op.kind, d.accion, op.payload.id));
+    if (d && !repetida) {
       await supabase.rpc("log_audit", {
         p_user_id: sesion.userId,
         p_email: sesion.email,
@@ -366,7 +408,16 @@ export async function POST(req: Request) {
     }
 
     results.push({ id: op.id, ok: true });
+
+    if (!repetida) {
+      const aviso = avisoPara(op.kind, op.payload, sesion.nombre, sospecha);
+      if (aviso) avisos.push(aviso);
+    }
   }
+
+  // Los avisos salen cuando la respuesta ya se mandó: el dispositivo no
+  // espera a Google ni a Apple para vaciar su cola.
+  if (avisos.length > 0) after(() => avisarADuenos(avisos, sesion.userId));
 
   return NextResponse.json({ results });
 }

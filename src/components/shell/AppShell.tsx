@@ -27,6 +27,7 @@ import { ensureSeeded } from "@/lib/seed";
 import { startSyncEngine, pullCatalog } from "@/lib/sync/engine";
 import { ConnectionStatus } from "./ConnectionStatus";
 import { BotonAyuda } from "./Ayuda";
+import { AvisoNotificaciones } from "./Notificaciones";
 import { Button } from "@/components/ui/Button";
 
 const NAV = [
@@ -195,20 +196,24 @@ export function PageHeader({
   action?: React.ReactNode;
 }) {
   return (
-    <header className="sticky top-0 z-20 border-b border-[var(--border-soft)] bg-surface-app/95 px-4 pb-3 pt-[calc(0.75rem+env(safe-area-inset-top))] backdrop-blur">
-      <div className="flex items-center justify-between gap-2">
-        <div className="min-w-0">
-          <h1 className="truncate font-[family-name:var(--font-fraunces)] text-2xl font-bold text-brand-900">
-            {title}
-          </h1>
-          {subtitle ? <p className="text-xs text-ink-700">{subtitle}</p> : null}
+    <>
+      <header className="sticky top-0 z-20 border-b border-[var(--border-soft)] bg-surface-app/95 px-4 pb-3 pt-[calc(0.75rem+env(safe-area-inset-top))] backdrop-blur">
+        <div className="flex items-center justify-between gap-2">
+          <div className="min-w-0">
+            <h1 className="truncate font-[family-name:var(--font-fraunces)] text-2xl font-bold text-brand-900">
+              {title}
+            </h1>
+            {subtitle ? <p className="text-xs text-ink-700">{subtitle}</p> : null}
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
+            {action}
+            <ConnectionStatus />
+            <BotonAyuda />
+          </div>
         </div>
-        <div className="flex shrink-0 items-center gap-2">
-          {action}
-          <ConnectionStatus />
-          <BotonAyuda />
-        </div>
-      </div>
-    </header>
+      </header>
+      {/* Debajo del encabezado y fuera de lo fijo: se va al scrollear */}
+      <AvisoNotificaciones />
+    </>
   );
 }

@@ -20,6 +20,7 @@ import { supabaseBrowser } from "@/lib/auth/client";
 import { useUI } from "@/stores/ui";
 import { pullCatalog, flushOutbox } from "@/lib/sync/engine";
 import { PageHeader } from "@/components/shell/AppShell";
+import { PanelNotificaciones } from "@/components/shell/Notificaciones";
 import { db } from "@/lib/db";
 
 const LINKS = [
@@ -94,6 +95,8 @@ export default function MasPage() {
             </button>
           </li>
         </ul>
+
+        <PanelNotificaciones />
 
         {isIOS && !isStandalone ? (
           <section className="rounded-3xl border border-[var(--border-soft)] bg-surface-card p-4">

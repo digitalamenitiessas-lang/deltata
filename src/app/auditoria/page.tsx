@@ -30,8 +30,12 @@ interface Perfil {
   activo: boolean;
 }
 
+// Todas las acciones que se registran (desde /api/sync, /api/usuarios y los
+// triggers de la base). Si se suma una nueva, va acá: si no, no se puede
+// filtrar por ella y aparece con su nombre interno.
 const ACCIONES: Record<string, { label: string; tone: BadgeTone }> = {
   venta: { label: "Venta", tone: "brand" },
+  venta_a_revisar: { label: "Venta a revisar", tone: "danger" },
   apertura_caja: { label: "Apertura de caja", tone: "info" },
   cierre_caja: { label: "Cierre de caja", tone: "warn" },
   gasto: { label: "Gasto", tone: "muted" },
@@ -41,19 +45,30 @@ const ACCIONES: Record<string, { label: string; tone: BadgeTone }> = {
   conteo: { label: "Conteo físico", tone: "info" },
   cambio_precio: { label: "Cambio de precio", tone: "warn" },
   cambio_costo: { label: "Cambio de costo", tone: "warn" },
+  cambio_precio_canal: { label: "Precio por lugar", tone: "warn" },
+  cambio_recargo_canal: { label: "Recargo de lugar", tone: "warn" },
   baja_producto: { label: "Baja de producto", tone: "danger" },
   alta_producto: { label: "Alta de producto", tone: "ok" },
+  alta_promo: { label: "Alta de promo", tone: "ok" },
+  cambio_promo: { label: "Cambio de promo", tone: "warn" },
+  baja_promo: { label: "Baja de promo", tone: "muted" },
   cobro_cuenta: { label: "Cobro cta. cte.", tone: "ok" },
   ajuste_cuenta: { label: "Ajuste cta. cte.", tone: "danger" },
   alta_cliente: { label: "Alta de cliente", tone: "muted" },
+  alta_usuario: { label: "Alta de usuario", tone: "info" },
+  cambio_usuario: { label: "Cambio de usuario", tone: "warn" },
+  reset_password: { label: "Cambio de contraseña", tone: "warn" },
 };
 
 // Lo que el dueño mira primero: lo que puede tapar un faltante.
 const SENSIBLES = new Set([
+  "venta_a_revisar",
   "merma",
   "ajuste_stock",
   "cambio_precio",
   "cambio_costo",
+  "cambio_precio_canal",
+  "cambio_recargo_canal",
   "baja_producto",
   "ajuste_cuenta",
 ]);
