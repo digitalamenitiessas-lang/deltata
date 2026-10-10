@@ -10,9 +10,14 @@ import {
   MessageCircle,
   Tag,
   UserRound,
+  AlertTriangle,
+  ClipboardList,
 } from "lucide-react";
 import { db } from "@/lib/db";
-import { recordSale } from "@/lib/ops";
+import { cajaOlvidada, cobrarPedido, crearPedido, recordSale } from "@/lib/ops";
+import { canalDelLugar, ubicacionDeCanal } from "@/lib/lugar";
+import { useEquipo } from "@/stores/equipo";
+import { NuevoPedidoSheet, type DatosPedido } from "@/components/pedidos/NuevoPedidoSheet";
 import { computeCart, claveLinea } from "@/lib/pricing";
 import { formatARS } from "@/lib/money";
 import { notifyOutboxChanged, useSyncStore } from "@/lib/sync/engine";
@@ -34,6 +39,7 @@ import {
   type PaymentMethod,
   type Presentacion,
   type ProductKind,
+  type Pedido,
   type Sale,
 } from "@/types";
 
@@ -62,6 +68,11 @@ export default function VenderPage() {
   const [reciboAbierto, setReciboAbierto] = useState(false);
   const [clienteAbierto, setClienteAbierto] = useState(false);
   const [buscaCliente, setBuscaCliente] = useState("");
+  const [vuelto, setVuelto] = useState<number | null>(null);
+  const [pedidoAbierto, setPedidoAbierto] = useState(false);
+  // Pedido recién tomado que pagan en el momento: se cobra con el mismo sheet
+  const [pedidoACobrar, setPedidoACobrar] = useState<Pedido | null>(null);
+  const ubicacionEquipo = useEquipo((s) => s.ubicacionId);
 
   const {
     quantities,
@@ -90,10 +101,22 @@ export default function VenderPage() {
   const promos = useLiveQuery(() => db.promos.orderBy("sort_order").toArray(), []);
   const customers = useLiveQuery(() => db.customers.toArray(), []);
   const clienteElegido = (customers ?? []).find((c) => c.id === customerId) ?? null;
+  // Sin elegir, arranca con el canal del lugar donde está este equipo (la
+  // compu del local vende como Local; el celular del foodtruck, como Foodtruck)
   const canalActivo = useMemo(() => {
     const lista = (canales ?? []).filter((c) => c.activo);
-    return lista.find((c) => c.id === canalId) ?? lista.find((c) => c.es_default) ?? lista[0] ?? null;
-  }, [canales, canalId]);
+    return lista.find((c) => c.id === canalId) ?? canalDelLugar(lista, ubicacionEquipo);
+  }, [canales, canalId, ubicacionEquipo]);
+  const ubicacionVenta = ubicacionDeCanal(canalActivo);
+  const stockLugar = useLiveQuery(
+    async () =>
+      new Map(
+        (await db.stock_ubic.where("ubicacion_id").equals(ubicacionVenta).toArray()).map(
+          (r) => [r.product_id, r.qty]
+        )
+      ),
+    [ubicacionVenta]
+  );
   const preciosCanal = useLiveQuery(
     async () =>
       canalActivo
@@ -119,11 +142,14 @@ export default function VenderPage() {
     );
   }, [cajasAbiertas, canalActivo]);
   const trackedIds = useLiveQuery(async () => {
-    const [movKeys, countKeys] = await Promise.all([
+    // stock_ubic tiene una fila por cada producto que alguna vez se movió
+    // (viene del servidor con TODA la historia; el historial local es parcial)
+    const [movKeys, countKeys, lugarKeys] = await Promise.all([
       db.stock_movements.orderBy("product_id").uniqueKeys(),
       db.stock_counts.orderBy("product_id").uniqueKeys(),
+      db.stock_ubic.orderBy("product_id").uniqueKeys(),
     ]);
-    return new Set([...movKeys, ...countKeys].map(String));
+    return new Set([...movKeys, ...countKeys, ...lugarKeys].map(String));
   }, []);
 
   const activeProducts = useMemo(
@@ -240,22 +266,42 @@ export default function VenderPage() {
     cash_received?: number;
     customer_id?: string;
   }) => {
-    const sale = await recordSale({
-      quantities,
-      payment_method: input.payment_method,
-      // Si eligieron el cliente al empezar, la venta queda a su nombre aunque
-      // pague en efectivo: es lo que alimenta el "suele llevar" de mañana.
-      customer_id: input.customer_id ?? customerId ?? undefined,
-      manualDiscount,
-      cash_received: input.cash_received,
-      sold_by: profileName,
-      note: note || undefined,
-      canal_id: canalActivo?.id ?? null,
-    });
+    const sale = pedidoACobrar
+      ? (
+          await cobrarPedido({
+            pedido_id: pedidoACobrar.id,
+            payment_method: input.payment_method,
+            cash_received: input.cash_received,
+            customer_id: input.customer_id ?? customerId ?? undefined,
+            sold_by: profileName,
+            expected_total: pedidoACobrar.total,
+          })
+        ).sale
+      : await recordSale({
+          quantities,
+          payment_method: input.payment_method,
+          // Si eligieron el cliente al empezar, la venta queda a su nombre aunque
+          // pague en efectivo: es lo que alimenta el "suele llevar" de mañana.
+          customer_id: input.customer_id ?? customerId ?? undefined,
+          manualDiscount,
+          cash_received: input.cash_received,
+          sold_by: profileName,
+          note: note || undefined,
+          canal_id: canalActivo?.id ?? null,
+          // lo que el cliente vio en pantalla: si cambió, no se cobra otro número
+          expected_total: cart.total,
+        });
     notifyOutboxChanged();
     setPayOpen(false);
+    setPedidoACobrar(null);
     clear();
     setUltimaVenta(sale);
+    // El vuelto queda a la vista hasta el próximo pedido: el toast se va solo
+    setVuelto(
+      input.payment_method === "efectivo" && input.cash_received != null
+        ? input.cash_received - sale.total
+        : null
+    );
     if (typeof navigator !== "undefined" && "vibrate" in navigator) {
       navigator.vibrate?.(40);
     }
@@ -266,15 +312,87 @@ export default function VenderPage() {
     );
   };
 
+  const guardarPedido = async (datos: DatosPedido, cobrarAhora: boolean) => {
+    try {
+      const pedido = await crearPedido({
+        ...datos,
+        creado_por: profileName,
+        canal_id: canalActivo?.id ?? null,
+        cantidades: quantities,
+        lineas: cart.lines.map((l) => ({
+          product_id: l.product_id,
+          product_name: l.product_name,
+          qty: l.qty,
+          presentacion: l.presentacion,
+          line_total: l.line_total,
+        })),
+        // sin descuento a mano: el pedido se cobra con lo que diga el sistema
+        total: cart.total + cart.manualDiscount,
+      });
+      notifyOutboxChanged();
+      setPedidoAbierto(false);
+      if (cobrarAhora) {
+        setPedidoACobrar(pedido);
+        setPayOpen(true);
+      } else {
+        clear();
+        showToast(`Pedido de ${pedido.cliente_nombre} guardado`);
+      }
+    } catch (err) {
+      showToast(
+        err instanceof Error && err.message
+          ? `No se guardó el pedido: ${err.message}`
+          : "No se guardó el pedido. Reintentá."
+      );
+    }
+  };
+
+  // Una caja abierta de hace más de un turno: lo que se venda ahora se mezcla
+  // con otro día en el mismo arqueo
+  const cajaVieja = cajaOlvidada(openSession);
+
   return (
     <>
       <PageHeader
         title="Vender"
-        subtitle={`${canalActivo ? `${canalActivo.nombre} · ` : ""}caja abierta · ${openSession.opened_by}`}
+        subtitle={`${canalActivo ? `${canalActivo.nombre} · ` : ""}caja de ${openSession.opened_by}${
+          cajaVieja
+            ? ` · abierta el ${new Date(openSession.opened_at).toLocaleDateString("es-AR", {
+                day: "2-digit",
+                month: "2-digit",
+              })}`
+            : ""
+        }`}
       />
 
       <div className="flex flex-col gap-3 p-4">
         <PrimerosPasos compacto />
+
+        {cajaVieja ? (
+          <div className="flex items-start gap-2 rounded-2xl border border-warning-600 bg-[#f7ecd8] p-3">
+            <AlertTriangle size={18} className="mt-0.5 shrink-0 text-warning-600" aria-hidden />
+            <div className="min-w-0 flex-1">
+              <p className="text-sm font-bold text-ink-950">
+                Esta caja está abierta desde el{" "}
+                {new Date(openSession.opened_at).toLocaleString("es-AR", {
+                  day: "2-digit",
+                  month: "2-digit",
+                  hour: "2-digit",
+                  minute: "2-digit",
+                })}
+              </p>
+              <p className="text-xs text-ink-700">
+                Lo que vendas ahora se mezcla con ese día en el arqueo. Cerrala y
+                abrí una nueva para el turno de hoy.
+              </p>
+            </div>
+            <Link href={`/caja/cerrar?id=${openSession.id}`} className="shrink-0">
+              <Button size="sm" variant="secondary">
+                Cerrar
+              </Button>
+            </Link>
+          </div>
+        ) : null}
 
         {/* El recibo se manda si el cliente lo pide, después de cobrar */}
         {ultimaVenta && cart.totalUnits === 0 ? (
@@ -283,6 +401,11 @@ export default function VenderPage() {
               <p className="text-sm font-bold text-ink-950">
                 Última venta · {formatARS(ultimaVenta.total)}
               </p>
+              {vuelto != null && vuelto > 0 ? (
+                <p className="tnum text-lg font-bold text-success-600">
+                  Vuelto: {formatARS(vuelto)}
+                </p>
+              ) : null}
               <p className="text-xs text-ink-700">
                 ¿Pide el recibo? Mandáselo por WhatsApp.
               </p>
@@ -356,20 +479,25 @@ export default function VenderPage() {
               />
             </div>
           </div>
-        ) : (
+        ) : null}
+
+        {/* Cómo se lleva: cambia el precio, no el producto ni el stock. Va en
+            la misma fila que "cliente conocido": en el celular la grilla de
+            productos tiene que verse sin scrollear. */}
+        <div className="flex gap-2">
+        {!clienteElegido ? (
           <button
             type="button"
             onClick={() => setClienteAbierto(true)}
-            className="flex h-11 items-center justify-center gap-2 rounded-2xl border border-dashed border-[var(--border-strong)] text-sm font-bold text-ink-700"
+            aria-label="¿Es un cliente conocido?"
+            title="¿Es un cliente conocido?"
+            className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl border border-dashed border-[var(--border-strong)] text-ink-700"
           >
-            <UserRound size={16} aria-hidden />
-            ¿Es un cliente conocido?
+            <UserRound size={20} aria-hidden />
           </button>
-        )}
-
-        {/* Cómo se lleva: cambia el precio, no el producto ni el stock */}
+        ) : null}
         <div
-          className="grid grid-cols-2 gap-1 rounded-2xl bg-cream-200 p-1"
+          className="grid flex-1 grid-cols-2 gap-1 rounded-2xl bg-cream-200 p-1"
           role="radiogroup"
           aria-label="Cómo se lleva"
         >
@@ -402,6 +530,7 @@ export default function VenderPage() {
               </span>
             </button>
           ))}
+        </div>
         </div>
 
         <div className="flex items-center gap-2 rounded-2xl border border-[var(--border-soft)] bg-surface-card px-3">
@@ -442,6 +571,7 @@ export default function VenderPage() {
               presentacion={presentacion}
               qty={quantities[claveLinea(p.id, presentacion)] ?? 0}
               everTracked={trackedIds?.has(p.id) ?? false}
+              stockQty={stockLugar?.get(p.id) ?? 0}
               onAdd={() => add(p.id, presentacion)}
               onRemove={() =>
                 setQty(
@@ -494,6 +624,17 @@ export default function VenderPage() {
               >
                 Ver pedido
               </Button>
+              <Button
+                variant="ghost"
+                size="md"
+                className="text-ink-inverse"
+                aria-label="Guardar como pedido para llevar o delivery"
+                title="Guardar como pedido"
+                onClick={() => setPedidoAbierto(true)}
+              >
+                <ClipboardList size={18} />
+                <span className="hidden sm:inline">Pedido</span>
+              </Button>
               <Button variant="gold" size="lg" onClick={() => setPayOpen(true)}>
                 Cobrar
               </Button>
@@ -510,10 +651,27 @@ export default function VenderPage() {
       />
       <PaymentSheet
         open={payOpen}
-        onOpenChange={setPayOpen}
-        total={cart.total}
+        onOpenChange={(o) => {
+          setPayOpen(o);
+          // Si cierran sin cobrar, el pedido queda guardado igual (sin pagar)
+          if (!o && pedidoACobrar) {
+            setPedidoACobrar(null);
+            clear();
+            showToast(`Pedido de ${pedidoACobrar.cliente_nombre} guardado sin cobrar`);
+          }
+        }}
+        total={pedidoACobrar ? pedidoACobrar.total : cart.total}
+        titulo={pedidoACobrar ? `Cobrar pedido de ${pedidoACobrar.cliente_nombre}` : "Cobrar"}
         clientePreelegido={customerId}
         onConfirm={confirmSale}
+      />
+      <NuevoPedidoSheet
+        open={pedidoAbierto}
+        onOpenChange={setPedidoAbierto}
+        total={cart.total + cart.manualDiscount}
+        unidades={cart.totalUnits}
+        hayDescuentoManual={cart.manualDiscount > 0}
+        onGuardar={guardarPedido}
       />
       <ReciboSheet
         sale={reciboAbierto ? ultimaVenta : null}

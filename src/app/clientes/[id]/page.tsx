@@ -7,6 +7,8 @@ import { recordCustomerPayment } from "@/lib/ops";
 import { notifyOutboxChanged } from "@/lib/sync/engine";
 import { formatARS, formatARSSigned } from "@/lib/money";
 import { useSesion } from "@/stores/sesion";
+import { useEquipo } from "@/stores/equipo";
+import { ubicacionDeCanal } from "@/lib/lugar";
 import { useUI } from "@/stores/ui";
 import { PageHeader } from "@/components/shell/AppShell";
 import { Button } from "@/components/ui/Button";
@@ -45,6 +47,23 @@ export default function ClienteDetallePage({
   const [method, setMethod] = useState<PaymentMethod>("efectivo");
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
+  const [cajaElegida, setCajaElegida] = useState<string | null>(null);
+  const ubicacionEquipo = useEquipo((s) => s.ubicacionId);
+  const cajas = useLiveQuery(
+    () => db.cash_sessions.where("status").equals("abierta").toArray(),
+    []
+  );
+  const canales = useLiveQuery(() => db.canales.toArray(), []);
+  const nombreCanal = (cid: string | null) =>
+    (canales ?? []).find((c) => c.id === cid)?.nombre ?? "Caja";
+  // La plata en efectivo entra al cajón de UN lugar: con varias cajas abiertas
+  // hay que decir cuál (antes caía en la más reciente, de cualquier lugar)
+  const cajaDelEquipo = (cajas ?? []).find(
+    (c) =>
+      ubicacionEquipo != null &&
+      ubicacionDeCanal((canales ?? []).find((x) => x.id === c.canal_id)) === ubicacionEquipo
+  );
+  const caja = cajaElegida ?? cajaDelEquipo?.id ?? (cajas ?? [])[0]?.id ?? null;
 
   if (!customer) {
     return (
@@ -57,7 +76,7 @@ export default function ClienteDetallePage({
     );
   }
 
-  const balance = movements?.at(-1)?.balance_after ?? 0;
+  const balance = (movements ?? []).reduce((acc, m) => acc + m.amount, 0);
   const amount = parseMoney(amountRaw);
   const timeline = [...(movements ?? [])].reverse();
 
@@ -151,6 +170,31 @@ export default function ClienteDetallePage({
               </button>
             ))}
           </div>
+          {method === "efectivo" && (cajas ?? []).length > 1 ? (
+            <div>
+              <p className="mb-1 text-xs font-bold uppercase tracking-wide text-ink-700">
+                ¿En qué caja entra la plata?
+              </p>
+              <div className="flex flex-wrap gap-2" role="radiogroup" aria-label="Caja">
+                {(cajas ?? []).map((c) => (
+                  <button
+                    key={c.id}
+                    type="button"
+                    role="radio"
+                    aria-checked={caja === c.id}
+                    onClick={() => setCajaElegida(c.id)}
+                    className={`h-11 rounded-xl px-4 text-sm font-bold ${
+                      caja === c.id
+                        ? "bg-brand-900 text-ink-inverse"
+                        : "border border-[var(--border-soft)] bg-surface-card text-ink-700"
+                    }`}
+                  >
+                    {nombreCanal(c.canal_id)}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : null}
           <input
             value={note}
             onChange={(e) => setNote(e.target.value)}
@@ -179,6 +223,7 @@ export default function ClienteDetallePage({
                   payment_method: method,
                   note: note || undefined,
                   created_by: profileName,
+                  cash_session_id: method === "efectivo" ? caja : null,
                 });
                 notifyOutboxChanged();
                 showToast(`Pago registrado · ${formatARS(amount)}`);

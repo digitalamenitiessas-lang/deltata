@@ -1,10 +1,10 @@
 {
   "name": "Del Tata — Empanadas Tucumanas",
   "short_name": "Del Tata",
-  "description": "Ventas, caja y stock del foodtruck. Funciona sin conexión.",
+  "description": "Ventas, caja, stock y pedidos del local y el foodtruck. Funciona sin conexión.",
   "start_url": "/vender",
   "display": "standalone",
-  "orientation": "portrait",
+  "orientation": "any",
   "background_color": "#0b4723",
   "theme_color": "#0b4723",
   "lang": "es-AR",

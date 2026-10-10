@@ -18,7 +18,10 @@ import {
   BookOpen,
   UserCog,
   HandCoins,
+  ClipboardList,
 } from "lucide-react";
+import { useLiveQuery } from "dexie-react-hooks";
+import { db } from "@/lib/db";
 import { useSesion, esAdmin } from "@/stores/sesion";
 import { supabaseBrowser } from "@/lib/auth/client";
 import { Login } from "./Login";
@@ -32,6 +35,7 @@ import { Button } from "@/components/ui/Button";
 
 const NAV = [
   { href: "/vender", label: "Vender", icon: Store, soloAdmin: false },
+  { href: "/pedidos", label: "Pedidos", icon: ClipboardList, soloAdmin: false },
   { href: "/caja", label: "Caja", icon: Wallet, soloAdmin: false },
   { href: "/stock", label: "Stock", icon: Package, soloAdmin: false },
   { href: "/control", label: "Control", icon: ChartNoAxesColumn, soloAdmin: true },
@@ -39,7 +43,7 @@ const NAV = [
 ] as const;
 
 const SIDE_NAV = [
-  ...NAV.slice(0, 4),
+  ...NAV.slice(0, 5),
   { href: "/clientes", label: "Clientes", icon: Users, soloAdmin: false },
   { href: "/gastos", label: "Gastos", icon: ReceiptText, soloAdmin: false },
   { href: "/historial", label: "Historial", icon: History, soloAdmin: false },
@@ -58,6 +62,15 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const hideNav = useUI((s) => s.hideNav);
   const toast = useUI((s) => s.toast);
   const [hydrated, setHydrated] = useState(false);
+  // Pedidos sin entregar: se ven en la navegación desde cualquier pantalla
+  const pedidosEnCurso = useLiveQuery(
+    () =>
+      db.pedidos
+        .where("estado")
+        .anyOf("pendiente", "preparando", "listo")
+        .count(),
+    []
+  );
 
   useEffect(() => {
     setHydrated(true);
@@ -132,6 +145,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           >
             <Icon size={18} aria-hidden />
             {label}
+            {href === "/pedidos" && pedidosEnCurso ? (
+              <span className="tnum ml-auto rounded-full bg-gold-500 px-2 text-xs text-ink-950">
+                {pedidosEnCurso}
+              </span>
+            ) : null}
           </Link>
         ))}
       </aside>
@@ -158,11 +176,16 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                   key={href}
                   href={href}
                   aria-current={isActive(href) ? "page" : undefined}
-                  className={`flex h-16 flex-col items-center justify-center gap-1 text-[11px] font-bold ${
+                  className={`relative flex h-16 flex-col items-center justify-center gap-1 text-[11px] font-bold ${
                     isActive(href) ? "text-brand-900" : "text-ink-500"
                   }`}
                 >
                   <Icon size={22} aria-hidden strokeWidth={isActive(href) ? 2.4 : 2} />
+                  {href === "/pedidos" && pedidosEnCurso ? (
+                    <span className="tnum absolute right-[calc(50%-20px)] top-2 min-w-[18px] rounded-full bg-gold-500 px-1 text-center text-[10px] leading-[18px] text-ink-950">
+                      {pedidosEnCurso}
+                    </span>
+                  ) : null}
                   {label}
                 </Link>
               ))}

@@ -9,6 +9,10 @@ import type {
   Customer,
   AccountMovement,
   OutboxOp,
+  OpRechazada,
+  Pedido,
+  StockUbic,
+  Ubicacion,
 } from "@/types";
 
 interface MetaRow {
@@ -32,7 +36,11 @@ class DelTataDB extends Dexie {
   cliente_gustos!: Table<import("@/types").ClienteGusto, [string, string]>;
   empleados!: Table<import("@/types").Empleado, string>;
   account_movements!: Table<AccountMovement, string>;
+  ubicaciones!: Table<Ubicacion, string>;
+  stock_ubic!: Table<StockUbic, [string, string]>;
+  pedidos!: Table<Pedido, string>;
   outbox!: Table<OutboxOp, number>;
+  rechazadas!: Table<OpRechazada, number>;
   meta!: Table<MetaRow, string>;
 
   constructor() {
@@ -69,6 +77,17 @@ class DelTataDB extends Dexie {
       cash_sessions: "id, opened_at, status, canal_id, [canal_id+status]",
       cliente_gustos: "[customer_id+product_id], customer_id",
       empleados: "id, nombre",
+    });
+    // v6: el local físico. Stock por lugar, pedidos para llevar, y las
+    // operaciones que el servidor rechazó salen de la cola en vez de trabarla.
+    this.version(6).stores({
+      ubicaciones: "id, sort_order",
+      stock_ubic: "[product_id+ubicacion_id], product_id, ubicacion_id",
+      pedidos: "id, estado, para_cuando, creado_en",
+      rechazadas: "++id, entity_id, rechazada_en",
+      stock_movements:
+        "id, product_id, moved_at, type, ubicacion_id, [product_id+moved_at]",
+      stock_counts: "id, product_id, counted_at, ubicacion_id",
     });
   }
 }

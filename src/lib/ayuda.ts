@@ -126,7 +126,11 @@ const AYUDAS: Record<string, Ayuda> = {
       },
       {
         t: "Cobrá",
-        d: "Tocá “Cobrar” y elegí el medio de pago. En efectivo podés escribir cuánto te dieron y te calcula el vuelto. En cuenta corriente hay que elegir el cliente.",
+        d: "Tocá “Cobrar” y elegí el medio de pago. En efectivo tocá “Justo” o el billete que te dieron ($10.000, $20.000…) y el vuelto queda a la vista. Si el monto no alcanza, no deja confirmar. En QR y posnet, confirmá recién cuando veas el pago aprobado. En cuenta corriente hay que elegir el cliente.",
+      },
+      {
+        t: "¿Es para llevar o delivery? Guardalo como pedido",
+        d: "Armá el pedido igual y tocá “Pedido” en vez de “Cobrar”: anotás el nombre, el teléfono, si lo retira o se lleva, y para qué hora. Si ya pagó, lo cobrás en el momento; si no, se cobra al entregarlo desde Pedidos.",
       },
       {
         t: "Confirmá y, si lo pide, mandale el recibo",
@@ -135,6 +139,12 @@ const AYUDAS: Record<string, Ayuda> = {
     ],
     ojo: [
       { t: "Sin caja abierta en ese lugar no se puede vender. Primero abrila desde Caja." },
+      {
+        t: "Vender arranca en la caja del lugar donde está el equipo (se elige una vez en Más → “¿Dónde está este equipo?”).",
+      },
+      {
+        t: "Si la caja abierta es de otro día, aparece un aviso naranja: cerrala y abrí una nueva, si no las ventas de hoy se mezclan con ese día.",
+      },
       { t: "Sin internet se vende igual: la venta queda guardada en el teléfono y se sube sola cuando vuelve la señal." },
       {
         t: "Los descuentos a mano los autoriza el dueño. Los de media docena, docena y las promos se aplican solos: no hace falta hacer nada.",
@@ -149,6 +159,34 @@ const AYUDAS: Record<string, Ayuda> = {
       { href: "/caja", label: "Caja" },
       { href: "/historial", label: "Reenviar un recibo" },
     ],
+  },
+
+  "/pedidos": {
+    titulo: "Pedidos",
+    etapa: "vender",
+    queEs:
+      "Los pedidos para llevar y delivery, desde que se toman hasta que se entregan. Se ven en todos los equipos: el que atiende WhatsApp los carga y en el local se preparan.",
+    pasos: [
+      {
+        t: "Tomar un pedido",
+        d: "Desde Vender: armá el pedido y tocá “Pedido”. Anotá nombre, teléfono, si lo retira o es delivery (con dirección) y la hora.",
+      },
+      { t: "Prepararlo", d: "“Empezar a preparar” y después “Marcar listo”." },
+      {
+        t: "Avisarle",
+        d: "Con el pedido listo, “Avisar” abre WhatsApp con el mensaje escrito para el cliente.",
+      },
+      {
+        t: "Cobrar y entregar",
+        d: "Si no pagó, “Cobrar y entregar” cobra con el precio de hoy y lo da por entregado. Si ya pagó, “Entregado”.",
+      },
+    ],
+    ojo: [
+      { t: "El stock se descuenta cuando se cobra, no cuando se toma el pedido." },
+      { t: "Para cobrarlo tiene que estar abierta la caja del canal en que se tomó." },
+      { t: "Los que tienen la hora vencida aparecen en rojo como atrasados." },
+    ],
+    ver: [{ href: "/vender", label: "Vender" }],
   },
 
   "/caja": {
@@ -212,6 +250,10 @@ const AYUDAS: Record<string, Ayuda> = {
         d: "El sistema muestra el fondo inicial, las ventas en efectivo, los gastos, el esperado, lo contado y la diferencia. Abajo, el resto de los medios de pago del turno.",
       },
       {
+        t: "Compará QR, posnet y transferencias",
+        d: "Si hubo cobros por QR, posnet o transferencia, anotá cuánto dice el resumen de Mercado Pago, el cierre del posnet y el banco. El sistema marca si no coincide. Si no lo tenés a mano, dejalo vacío.",
+      },
+      {
         t: "Si hay diferencia grande, explicala",
         d: "Por encima del 1% del esperado (o $1.000) la nota es obligatoria.",
       },
@@ -222,6 +264,9 @@ const AYUDAS: Record<string, Ayuda> = {
         t: "¿Por qué a ciegas? Si ves el número antes, sin querer contás hasta llegar a él, y el conteo deja de detectar nada.",
       },
       { t: "El cierre no se puede editar después. Una corrección se registra como ajuste." },
+      {
+        t: "¿Quedó abierta una caja de otro día en otro equipo? El dueño la puede cerrar “sin arqueo” desde Caja, sin inventar cuánta plata había.",
+      },
       {
         t: "Si entre el conteo y el cierre entró una venta o un gasto, te avisa y te pide revisar: el esperado cambió.",
       },
@@ -243,8 +288,16 @@ const AYUDAS: Record<string, Ayuda> = {
     titulo: "Stock",
     etapa: "semana",
     queEs:
-      "Cuánto hay de cada producto según el sistema y en qué estado está: normal, bajo, crítico, sin stock o nunca contado.",
+      "Cuánto hay de cada producto en cada lugar (el local y el foodtruck tienen su congelador) y en qué estado está: normal, bajo, crítico, sin stock o nunca contado.",
     pasos: [
+      {
+        t: "Elegí el lugar",
+        d: "Arriba: Local o Foodtruck. Arranca en el lugar de este equipo. Lo que registres (mermas, entradas, conteos) va a ese lugar.",
+      },
+      {
+        t: "Llevar mercadería de un lugar al otro",
+        d: "Tocá el producto → “Llevar a otro lugar”: sale de uno y entra en el otro, el total no cambia. Usalo cuando el foodtruck se carga del local.",
+      },
       { t: "Filtrá", d: "Por empanadas, bebidas, los críticos o los que nunca se contaron." },
       {
         t: "Tocá un producto para registrar una merma",
@@ -265,6 +318,10 @@ const AYUDAS: Record<string, Ayuda> = {
     ],
     ojo: [
       { t: "Cocidas y congeladas son el mismo stock: una venta de cualquiera de las dos descuenta del mismo número." },
+      { t: "Cada venta descuenta del lugar de su canal: lo que se vende en el local, del local; lo del foodtruck, del foodtruck." },
+      {
+        t: "El que atiende no ve los números del sistema: así el conteo es a ciegas de verdad.",
+      },
       { t: "La merma exige motivo y queda destacada en Auditoría." },
       {
         t: "La entrada de mercadería y los ajustes los carga el dueño, porque son los números contra los que se compara el conteo.",
@@ -286,17 +343,29 @@ const AYUDAS: Record<string, Ayuda> = {
     pasos: [
       { t: "Elegí el producto", d: "Andá de a uno, en el orden en que están en la heladera o el freezer." },
       { t: "Contá y escribí el número", d: "En unidades: una docena son 12." },
+      { t: "Elegí el lugar", d: "Se cuenta un congelador por vez: el del local o el del foodtruck." },
+      {
+        t: "Guardá",
+        d: "Se guarda tal cual lo contaste. La diferencia con el sistema la revisa el dueño.",
+        soloEmpleado: true,
+      },
       {
         t: "Confirmá",
         d: "Recién ahí aparece lo que decía el sistema, la diferencia y cuánta plata representa.",
+        soloDueno: true,
       },
       {
         t: "Si la diferencia es grande, explicala",
         d: "Desde 5 unidades de diferencia la nota es obligatoria.",
+        soloDueno: true,
       },
     ],
     ojo: [
-      { t: "Rutina: el domingo a la noche se cuenta todo." },
+      { t: "Rutina: el domingo a la noche se cuenta todo, en cada lugar." },
+      {
+        t: "Si una venta hecha sin señal antes del conteo llega después, no se descuenta dos veces: el conteo ya la había medido.",
+        soloDueno: true,
+      },
       {
         t: "El conteo pisa el stock del sistema con el número contado, y la diferencia queda registrada con tu nombre.",
       },
@@ -549,8 +618,16 @@ const AYUDAS: Record<string, Ayuda> = {
         d: "Normalmente se sincroniza solo. Usalo si querés forzarlo antes de cerrar sesión o de apagar el teléfono.",
       },
       {
+        t: "¿Dónde está este equipo?",
+        d: "Elegí Local o Foodtruck una vez por equipo. Define con qué caja arranca Vender y en qué congelador se cuenta.",
+      },
+      {
+        t: "Sincronización",
+        d: "Muestra si queda algo por enviar y si el servidor rechazó alguna operación (con el motivo). Lo rechazado ya no frena lo demás: queda ahí y en la Auditoría.",
+      },
+      {
         t: "Cerrar sesión",
-        d: "Si quedan operaciones sin subir, te avisa antes. Se suben cuando alguien vuelva a entrar en ese teléfono.",
+        d: "Si quedan operaciones sin enviar, no deja salir hasta que se envíen: si no, quedarían a nombre de la próxima persona que entre.",
       },
       {
         t: "Notificaciones",

@@ -107,10 +107,44 @@ export default function CajaDetallePage({
               {session.note}
             </p>
           ) : null}
+          {session.sin_arqueo ? (
+            <p className="mt-3 rounded-xl bg-[#f7ecd8] px-3 py-2 text-sm font-bold text-warning-600">
+              Cerrada sin arqueo: no se contó el efectivo.
+            </p>
+          ) : null}
           <p className="mt-2 text-xs text-ink-500">
             Abrió {session.opened_by} · Cerró {session.closed_by ?? "—"}
           </p>
         </section>
+
+        {session.conciliacion && Object.keys(session.conciliacion).length > 0 ? (
+          <section className="rounded-3xl border border-[var(--border-soft)] bg-surface-card p-4">
+            <h2 className="mb-2 text-xs font-bold uppercase tracking-wide text-ink-500">
+              QR y posnet contra sus resúmenes
+            </h2>
+            <dl className="tnum flex flex-col gap-1.5 text-sm">
+              {(Object.entries(session.conciliacion) as [PaymentMethod, { sistema: number; informado: number }][]).map(
+                ([m, c]) => {
+                  const dif = c.informado - c.sistema;
+                  return (
+                    <div key={m} className="flex items-center justify-between gap-2">
+                      <dt className="text-ink-700">{PAYMENT_LABELS[m]}</dt>
+                      <dd className="text-right">
+                        <span className="font-bold">{formatARS(c.informado)}</span>
+                        <span className="text-xs text-ink-500"> informado · sistema {formatARS(c.sistema)}</span>
+                        {Math.abs(dif) >= 1 ? (
+                          <span className="block text-xs font-bold text-danger-600">
+                            diferencia {formatARSSigned(dif)}
+                          </span>
+                        ) : null}
+                      </dd>
+                    </div>
+                  );
+                }
+              )}
+            </dl>
+          </section>
+        ) : null}
 
         <section className="rounded-3xl border border-[var(--border-soft)] bg-surface-card p-4">
           <h2 className="mb-2 text-xs font-bold uppercase tracking-wide text-ink-500">

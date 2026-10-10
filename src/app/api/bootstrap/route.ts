@@ -23,11 +23,14 @@ export async function GET() {
     gustos,
     empleados,
     cajasAbiertas,
+    ubicaciones,
+    stockUbicacion,
+    pedidos,
   ] = await Promise.all([
     supabase
       .from("products")
       .select(
-        "id, name, kind, unit_price, half_dozen_price, dozen_price, frozen_dozen_price, cost_per_unit, current_qty, min_qty, sort_order, is_active, updated_at"
+        "id, name, kind, unit_price, half_dozen_price, dozen_price, frozen_dozen_price, cost_per_unit, current_qty, min_qty, sort_order, is_active, archivado, updated_at"
       )
       .order("sort_order"),
     supabase
@@ -42,7 +45,7 @@ export async function GET() {
       .order("seq"),
     supabase
       .from("canales")
-      .select("id, nombre, recargo_pct, es_default, activo, sort_order")
+      .select("id, nombre, recargo_pct, es_default, activo, sort_order, ubicacion_id")
       .order("sort_order"),
     supabase
       .from("canal_precios")
@@ -74,12 +77,32 @@ export async function GET() {
       .select("local_uuid, canal_id, opened_at, opened_by")
       .eq("status", "abierta")
       .order("opened_at"),
+    supabase
+      .from("ubicaciones")
+      .select("id, nombre, activo, sort_order")
+      .order("sort_order"),
+    // Cuánto hay en cada lugar: el local y el foodtruck tienen su congelador
+    supabase.from("stock_ubicacion").select("product_id, ubicacion_id, qty"),
+    // Pedidos en curso, más los cerrados en el día (para que no "desaparezcan"
+    // de golpe de la pantalla del otro equipo)
+    supabase
+      .from("pedidos")
+      .select(
+        "id, creado_en, creado_por, canal_id, cliente_nombre, telefono, tipo, direccion, para_cuando, estado, cantidades, lineas, total, nota, sale_id, pagado, cambiado_en"
+      )
+      .or(
+        `estado.in.(pendiente,preparando,listo),actualizado_en.gt.${new Date(
+          Date.now() - 24 * 3600 * 1000
+        ).toISOString()}`
+      )
+      .order("para_cuando", { ascending: true, nullsFirst: false }),
   ]);
 
   const error =
     products.error ?? customers.error ?? accountMovements.error ??
     canales.error ?? canalPrecios.error ?? promos.error ?? gustos.error ??
-    empleados.error ?? cajasAbiertas.error;
+    empleados.error ?? cajasAbiertas.error ?? ubicaciones.error ??
+    stockUbicacion.error ?? pedidos.error;
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
@@ -94,5 +117,8 @@ export async function GET() {
     cliente_gustos: gustos.data,
     empleados: empleados.data,
     cajas_abiertas: cajasAbiertas.data,
+    ubicaciones: ubicaciones.data,
+    stock_ubicacion: stockUbicacion.data,
+    pedidos: pedidos.data,
   });
 }

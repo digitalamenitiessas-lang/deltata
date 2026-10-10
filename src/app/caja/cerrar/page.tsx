@@ -17,7 +17,11 @@ import { useUI } from "@/stores/ui";
 import { PageHeader } from "@/components/shell/AppShell";
 import { Button } from "@/components/ui/Button";
 import { MoneyInput, parseMoney } from "@/components/ui/MoneyInput";
-import { PAYMENT_LABELS, type PaymentMethod } from "@/types";
+import { PAYMENT_LABELS, type Conciliacion, type PaymentMethod } from "@/types";
+
+// Medios que tienen su propio resumen para comparar: Mercado Pago, el posnet
+// y la cuenta del banco. El efectivo se cuenta; la cuenta corriente es deuda.
+const CONCILIABLES = ["qr", "tarjeta", "transferencia"] as const;
 
 // useSearchParams necesita un límite de Suspense para poder prerenderizar
 export default function CerrarCajaPage() {
@@ -58,6 +62,7 @@ function CerrarCaja() {
   const [step, setStep] = useState<"conteo" | "revision">("conteo");
   const [countedRaw, setCountedRaw] = useState("");
   const [note, setNote] = useState("");
+  const [informados, setInformados] = useState<Record<string, string>>({});
   const [summary, setSummary] = useState<CashSummary | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -191,6 +196,42 @@ function CerrarCaja() {
           </dl>
         </section>
 
+        {summary && CONCILIABLES.some((m) => summary.byMethod[m] > 0) ? (
+          <section className="rounded-3xl border border-[var(--border-soft)] bg-surface-card p-4">
+            <h2 className="text-xs font-bold uppercase tracking-wide text-ink-500">
+              QR, posnet y transferencias
+            </h2>
+            <p className="mb-3 mt-1 text-xs text-ink-700">
+              Mirá el resumen del día en Mercado Pago, el cierre del posnet y la
+              cuenta del banco, y anotá cuánto dicen. Si no lo tenés a mano,
+              dejalo vacío.
+            </p>
+            <div className="flex flex-col gap-3">
+              {CONCILIABLES.filter((m) => summary.byMethod[m] > 0).map((m) => {
+                const informado = informados[m] ?? "";
+                const dif = informado === "" ? null : parseMoney(informado) - summary.byMethod[m];
+                return (
+                  <div key={m}>
+                    <MoneyInput
+                      label={`${PAYMENT_LABELS[m]} según su resumen`}
+                      value={informado}
+                      onChange={(v) => setInformados((prev) => ({ ...prev, [m]: v }))}
+                      hint={`El sistema registró ${formatARS(summary.byMethod[m])}`}
+                    />
+                    {dif != null && Math.abs(dif) >= 1 ? (
+                      <p className="tnum mt-1 text-xs font-bold text-danger-600">
+                        Diferencia {formatARSSigned(dif)}: anotá en la nota qué pasó
+                      </p>
+                    ) : dif != null ? (
+                      <p className="mt-1 text-xs font-bold text-success-600">Coincide</p>
+                    ) : null}
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        ) : null}
+
         {summary ? (
           <section className="rounded-3xl border border-[var(--border-soft)] bg-surface-card p-4">
             <h2 className="mb-2 text-xs font-bold uppercase tracking-wide text-ink-500">
@@ -248,6 +289,16 @@ function CerrarCaja() {
               setBusy(true);
               setError(null);
               try {
+                const conciliacion: Conciliacion = {};
+                for (const m of CONCILIABLES) {
+                  const v = informados[m];
+                  if (v != null && v !== "" && summary) {
+                    conciliacion[m] = {
+                      sistema: summary.byMethod[m],
+                      informado: parseMoney(v),
+                    };
+                  }
+                }
                 await closeCash({
                   counted_cash: counted,
                   closed_by: profileName,
@@ -255,6 +306,7 @@ function CerrarCaja() {
                   note: note || undefined,
                   // si hubo movimientos entre el conteo y este tap, aborta
                   expected_snapshot: expected,
+                  conciliacion: Object.keys(conciliacion).length > 0 ? conciliacion : null,
                 });
                 notifyOutboxChanged();
                 showToast("Caja cerrada");

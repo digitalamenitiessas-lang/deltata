@@ -81,17 +81,27 @@ export function avisoPara(
           (esperado != null && contado != null
             ? ` · esperado ${formatARS(esperado)}, contado ${formatARS(contado)}`
             : "") +
+          (sospecha ? ` · ⚠ ${sospecha}` : "") +
           extra,
-        url: "/caja",
+        url: sospecha ? "/auditoria" : "/caja",
         tag: `caja-${String(p.id ?? "")}`,
       };
     }
 
     case "expense":
       return {
-        titulo: `Gasto de ${formatARS(num(p.amount) ?? 0)}`,
-        cuerpo: `${quien}: ${String(p.description ?? "sin detalle")}${extra}`,
-        url: "/gastos",
+        titulo: sospecha
+          ? `Gasto para revisar: ${formatARS(num(p.amount) ?? 0)}`
+          : `Gasto de ${formatARS(num(p.amount) ?? 0)}`,
+        cuerpo: `${quien}: ${String(p.description ?? "sin detalle")}${sospecha ? ` · ${sospecha}` : ""}${extra}`,
+        url: sospecha ? "/auditoria" : "/gastos",
+      };
+
+    case "transfer_stock":
+      return {
+        titulo: `Traslado de ${Math.abs(num(p.qty) ?? 0)} unidades`,
+        cuerpo: `${quien}: de ${String(p.desde_nombre ?? "?")} a ${String(p.hacia_nombre ?? "?")}${extra}`,
+        url: "/stock/movimientos",
       };
 
     case "stock_move":

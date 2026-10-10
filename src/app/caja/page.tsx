@@ -5,11 +5,14 @@ import Link from "next/link";
 import { useLiveQuery } from "dexie-react-hooks";
 import { AlertTriangle } from "lucide-react";
 import { db } from "@/lib/db";
-import { summarizeSession, type CashSummary } from "@/lib/ops";
+import { cajaOlvidada, forceCloseCash, summarizeSession, type CashSummary } from "@/lib/ops";
 import {
   CLAVE_CAJAS_REMOTAS,
+  notifyOutboxChanged,
   type CajaAbiertaRemota,
 } from "@/lib/sync/engine";
+import { useSesion, esAdmin } from "@/stores/sesion";
+import { useUI } from "@/stores/ui";
 import { formatARS, formatARSSigned } from "@/lib/money";
 import { PageHeader } from "@/components/shell/AppShell";
 import { Button } from "@/components/ui/Button";
@@ -28,15 +31,17 @@ const dateFmt = new Intl.DateTimeFormat("es-AR", {
   minute: "2-digit",
 });
 
-const esDeHoy = (iso: string) => {
-  const d = new Date(iso);
-  const hoy = new Date();
-  return d.toDateString() === hoy.toDateString();
-};
+// "De hoy" = abierta hace menos de un turno largo. Con la fecha calendario,
+// la caja del turno noche pasaba a "olvidada" a la medianoche.
+const esDeHoy = (iso: string) => !cajaOlvidada({ opened_at: iso });
 
 // Cada lugar (casa, foodtruck, PedidosYa) lleva su propia caja. Compartir
 // arqueo haría que el descuadre de uno tape el del otro.
 export default function CajaPage() {
+  const usuario = useSesion((s) => s.usuario);
+  const admin = esAdmin(usuario);
+  const showToast = useUI((s) => s.showToast);
+  const [cerrando, setCerrando] = useState<string | null>(null);
   const abiertas = useLiveQuery(
     () => db.cash_sessions.where("status").equals("abierta").toArray(),
     []
@@ -80,10 +85,37 @@ export default function CajaPage() {
     () => new Set((abiertas ?? []).map((s) => s.id)),
     [abiertas]
   );
-  const olvidadas = useMemo(
-    () => (remotas ?? []).filter((s) => !esDeHoy(s.opened_at)),
-    [remotas]
-  );
+  // Las del servidor y las de este equipo (que pueden no haber llegado todavía)
+  const olvidadas = useMemo(() => {
+    const porId = new Map<string, { local_uuid: string; canal_id: string | null; opened_at: string; opened_by: string | null }>();
+    for (const r of remotas ?? []) porId.set(r.local_uuid, r);
+    for (const a of abiertas ?? []) {
+      porId.set(a.id, { local_uuid: a.id, canal_id: a.canal_id, opened_at: a.opened_at, opened_by: a.opened_by });
+    }
+    return [...porId.values()].filter((s) => !esDeHoy(s.opened_at));
+  }, [remotas, abiertas]);
+
+  const cerrarSinArqueo = async (id: string) => {
+    const nota = window.prompt(
+      "Se cierra sin contar la plata (queda marcada como “sin arqueo”). ¿Qué pasó con esta caja?",
+      "Quedó abierta de otro día"
+    );
+    if (nota == null) return;
+    setCerrando(id);
+    try {
+      await forceCloseCash({
+        session_id: id,
+        closed_by: usuario?.nombre ?? "",
+        note: nota.trim() || "Quedó abierta de otro día",
+      });
+      notifyOutboxChanged();
+      showToast("Caja cerrada sin arqueo");
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "No se pudo cerrar la caja.");
+    } finally {
+      setCerrando(null);
+    }
+  };
   const enOtroEquipo = useMemo(
     () => (remotas ?? []).filter((s) => !locales.has(s.local_uuid)),
     [remotas, locales]
@@ -133,14 +165,37 @@ export default function CajaPage() {
                   : `Quedaron ${olvidadas.length} cajas de otros días sin cerrar`}
               </p>
               <p className="mt-0.5 text-xs text-ink-700">
-                Mientras siga abierta, sus ventas no entran en ningún arqueo.
-                Cerrala con lo que haya y dejá una nota explicando.
+                {admin
+                  ? "Mientras siga abierta, sus ventas no entran en ningún arqueo y no se puede abrir otra en ese lugar. Si está en este equipo, cerrala contando la plata. Si no, cerrala sin arqueo desde acá."
+                  : "Mientras siga abierta, sus ventas no entran en ningún arqueo. Si está en este equipo, cerrala contando la plata; si no, avisale al dueño."}
               </p>
-              <ul className="mt-1 text-xs text-ink-700">
+              <ul className="mt-2 flex flex-col gap-2 text-xs text-ink-700">
                 {olvidadas.map((s) => (
-                  <li key={s.local_uuid} className="tnum">
-                    · {nombreCanal(s.canal_id)} — {dateFmt.format(new Date(s.opened_at))}
-                    {s.opened_by ? ` · ${s.opened_by}` : ""}
+                  <li key={s.local_uuid} className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="tnum">
+                      {nombreCanal(s.canal_id)} — {dateFmt.format(new Date(s.opened_at))}
+                      {s.opened_by ? ` · ${s.opened_by}` : ""}
+                    </span>
+                    <span className="flex gap-2">
+                      {locales.has(s.local_uuid) ? (
+                        <Link href={`/caja/cerrar?id=${s.local_uuid}`}>
+                          <Button size="sm" variant="secondary">
+                            Contar y cerrar
+                          </Button>
+                        </Link>
+                      ) : null}
+                      {admin ? (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="text-danger-600"
+                          disabled={cerrando === s.local_uuid}
+                          onClick={() => void cerrarSinArqueo(s.local_uuid)}
+                        >
+                          Cerrar sin arqueo
+                        </Button>
+                      ) : null}
+                    </span>
                   </li>
                 ))}
               </ul>
@@ -237,8 +292,11 @@ function CajaDeCanal({
         <div>
           <p className="text-sm font-bold">{nombre}</p>
           <p className="text-xs text-brand-100">
-            Abierta {timeFmt.format(new Date(session.opened_at))} ·{" "}
-            {session.opened_by}
+            Abierta{" "}
+            {cajaOlvidada(session)
+              ? `el ${dateFmt.format(new Date(session.opened_at))}`
+              : timeFmt.format(new Date(session.opened_at))}{" "}
+            · {session.opened_by}
           </p>
         </div>
         <Link href={`/caja/cerrar?id=${session.id}`}>
@@ -319,9 +377,13 @@ function HistoryList({
               </div>
               <div className="text-right">
                 <p className="tnum text-sm font-bold">
-                  {s.difference != null ? formatARSSigned(s.difference) : "—"}
+                  {s.sin_arqueo
+                    ? "Sin arqueo"
+                    : s.difference != null
+                      ? formatARSSigned(s.difference)
+                      : "—"}
                 </p>
-                <p className="text-xs text-ink-500">diferencia</p>
+                <p className="text-xs text-ink-500">{s.sin_arqueo ? "cerrada por el dueño" : "diferencia"}</p>
               </div>
             </Link>
           </li>

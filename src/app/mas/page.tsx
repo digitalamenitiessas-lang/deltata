@@ -21,7 +21,12 @@ import { useUI } from "@/stores/ui";
 import { pullCatalog, flushOutbox } from "@/lib/sync/engine";
 import { PageHeader } from "@/components/shell/AppShell";
 import { PanelNotificaciones } from "@/components/shell/Notificaciones";
+import { PanelSync } from "@/components/shell/PanelSync";
 import { db } from "@/lib/db";
+import { useLiveQuery } from "dexie-react-hooks";
+import { MapPin } from "lucide-react";
+import { useEquipo } from "@/stores/equipo";
+import { useCart } from "@/stores/cart";
 
 const LINKS = [
   { href: "/guia", label: "Guía: qué hace cada cosa", icon: BookOpen, soloAdmin: false },
@@ -39,6 +44,9 @@ export default function MasPage() {
   const setUsuario = useSesion((s) => s.setUsuario);
   const showToast = useUI((s) => s.showToast);
   const admin = esAdmin(usuario);
+  const ubicacionId = useEquipo((s) => s.ubicacionId);
+  const setUbicacionId = useEquipo((s) => s.setUbicacionId);
+  const ubicaciones = useLiveQuery(() => db.ubicaciones.orderBy("sort_order").toArray(), []);
 
   const isIOS =
     typeof navigator !== "undefined" && /iPhone|iPad|iPod/.test(navigator.userAgent);
@@ -48,15 +56,22 @@ export default function MasPage() {
       ("standalone" in navigator &&
         (navigator as { standalone?: boolean }).standalone === true));
 
+  // Lo pendiente viaja con la sesión de quien esté conectado: si sale uno y
+  // entra otro, las operaciones del primero quedarían firmadas por el segundo
+  // (o rechazadas si el segundo no tiene permiso). Primero se envía, después
+  // se sale.
   const salir = async () => {
+    await flushOutbox();
     const pendientes = await db.outbox.count();
     if (pendientes > 0) {
-      const seguro = window.confirm(
-        `Quedan ${pendientes} operaciones sin sincronizar. Si cerrás sesión ahora, se sincronizan cuando alguien vuelva a entrar en este dispositivo. ¿Salir igual?`
+      window.alert(
+        `Quedan ${pendientes} ${pendientes === 1 ? "operación" : "operaciones"} sin enviar. Conectate a internet y esperá a que se envíen antes de cerrar sesión: si no, quedarían a nombre de la próxima persona que entre.`
       );
-      if (!seguro) return;
+      return;
     }
     await supabaseBrowser().auth.signOut();
+    // Un descuento o un pedido a medio armar no pasa al usuario siguiente
+    useCart.getState().clear();
     setUsuario(null);
   };
 
@@ -95,6 +110,44 @@ export default function MasPage() {
             </button>
           </li>
         </ul>
+
+        {(ubicaciones ?? []).length > 1 ? (
+          <section className="rounded-3xl border border-[var(--border-soft)] bg-surface-card p-4">
+            <div className="flex items-center gap-2">
+              <MapPin size={18} className="text-brand-900" aria-hidden />
+              <h2 className="text-sm font-bold text-ink-950">¿Dónde está este equipo?</h2>
+            </div>
+            <p className="mt-1 text-xs text-ink-700">
+              Con esto Vender arranca en la caja de ese lugar, y los conteos y
+              mermas se anotan en su congelador.
+            </p>
+            <div className="mt-3 flex gap-2" role="radiogroup" aria-label="Lugar del equipo">
+              {(ubicaciones ?? []).map((u) => (
+                <button
+                  key={u.id}
+                  type="button"
+                  role="radio"
+                  aria-checked={ubicacionId === u.id}
+                  onClick={() => {
+                    setUbicacionId(u.id);
+                    // que Vender tome el canal del lugar nuevo
+                    useCart.getState().setCanalId(null);
+                    showToast(`Este equipo está en ${u.nombre}`);
+                  }}
+                  className={`h-12 flex-1 rounded-xl text-sm font-bold ${
+                    ubicacionId === u.id
+                      ? "bg-brand-900 text-ink-inverse"
+                      : "border border-[var(--border-soft)] bg-surface-card text-ink-700"
+                  }`}
+                >
+                  {u.nombre}
+                </button>
+              ))}
+            </div>
+          </section>
+        ) : null}
+
+        <PanelSync admin={admin} />
 
         <PanelNotificaciones />
 

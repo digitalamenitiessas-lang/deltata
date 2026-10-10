@@ -14,14 +14,22 @@ export type StockState =
   | "nunca_contado"
   | "inactivo";
 
-export function stockState(product: Product, everTracked: boolean): StockState {
+/**
+ * `qty` es lo que hay en el lugar que se está mirando (local o foodtruck); sin
+ * él, el total. El mínimo es por lugar: cada congelador tiene que tenerlo.
+ */
+export function stockState(
+  product: Product,
+  everTracked: boolean,
+  qty: number = product.current_qty
+): StockState {
   if (!product.is_active) return "inactivo";
   if (!everTracked) return "nunca_contado";
-  if (product.current_qty < 0) return "negativo";
-  if (product.current_qty === 0) return "sin_stock";
+  if (qty < 0) return "negativo";
+  if (qty === 0) return "sin_stock";
   if (product.min_qty == null) return "sin_minimo";
-  if (product.current_qty <= product.min_qty / 2) return "critico";
-  if (product.current_qty <= product.min_qty) return "bajo";
+  if (qty <= product.min_qty / 2) return "critico";
+  if (qty <= product.min_qty) return "bajo";
   return "normal";
 }
 
@@ -39,10 +47,10 @@ export const STOCK_STATE_LABELS: Record<StockState, string> = {
 /** Estado breve para la tarjeta del POS (no siempre muestra la cifra exacta). */
 export function saleCardStockLabel(
   product: Product,
-  everTracked: boolean
+  everTracked: boolean,
+  qty: number = product.current_qty
 ): { label: string; tone: "ok" | "warn" | "danger" | "muted" } {
   if (!everTracked) return { label: "Stock sin contar", tone: "muted" };
-  const qty = product.current_qty;
   if (qty < 0) return { label: `Negativo (${qty})`, tone: "danger" };
   if (qty === 0) return { label: "Sin stock", tone: "danger" };
   if (qty <= 3) return { label: `Últimas ${qty}`, tone: "warn" };

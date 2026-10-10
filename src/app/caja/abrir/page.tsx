@@ -7,6 +7,9 @@ import { db } from "@/lib/db";
 import { openCash } from "@/lib/ops";
 import { notifyOutboxChanged } from "@/lib/sync/engine";
 import { formatARS } from "@/lib/money";
+import { useCart } from "@/stores/cart";
+import { useEquipo } from "@/stores/equipo";
+import { canalDelLugar } from "@/lib/lugar";
 import { useSesion } from "@/stores/sesion";
 import { useUI } from "@/stores/ui";
 import { PageHeader } from "@/components/shell/AppShell";
@@ -45,11 +48,11 @@ function AbrirCaja() {
     [canales]
   );
   const [canalElegido, setCanalElegido] = useState<string | null>(null);
+  const ubicacionEquipo = useEquipo((s) => s.ubicacionId);
   const canalId =
     canalElegido ??
     params.get("canal") ??
-    activos.find((c) => c.es_default)?.id ??
-    activos[0]?.id ??
+    canalDelLugar(activos, ubicacionEquipo)?.id ??
     null;
   const canal = activos.find((c) => c.id === canalId);
 
@@ -77,6 +80,9 @@ function AbrirCaja() {
           ? `Caja de ${canal.nombre} abierta con ${formatARS(amount)}`
           : `Caja abierta con ${formatARS(amount)}`
       );
+      // Vender arranca en el canal de la caja recién abierta (antes volvía
+      // con el canal anterior y decía "no hay caja abierta")
+      useCart.getState().setCanalId(canalId);
       router.replace("/vender");
     } catch (err) {
       setError(err instanceof Error ? err.message : "No se pudo abrir la caja.");

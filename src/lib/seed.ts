@@ -1,3 +1,4 @@
+import { UBICACION_FOODTRUCK, UBICACION_LOCAL } from "./lugar";
 import { db, getMeta, setMeta } from "./db";
 import type { Product } from "@/types";
 
@@ -85,12 +86,22 @@ export async function ensureSeeded(): Promise<void> {
   if ((await db.canales.count()) === 0) {
     await db.canales.bulkAdd([
       {
+        id: "ca17a7a0-0000-4000-8000-000000000003",
+        nombre: "Local",
+        recargo_pct: 0,
+        es_default: false,
+        activo: true,
+        sort_order: 0,
+        ubicacion_id: UBICACION_LOCAL,
+      },
+      {
         id: "ca17a7a0-0000-4000-8000-000000000001",
         nombre: "Foodtruck",
         recargo_pct: 0,
         es_default: true,
         activo: true,
         sort_order: 1,
+        ubicacion_id: UBICACION_FOODTRUCK,
       },
       {
         id: "ca17a7a0-0000-4000-8000-000000000002",
@@ -99,7 +110,15 @@ export async function ensureSeeded(): Promise<void> {
         es_default: false,
         activo: true,
         sort_order: 2,
+        ubicacion_id: UBICACION_LOCAL,
       },
+    ]);
+  }
+  // Lugares con mercadería propia: los mismos ids que la base
+  if ((await db.ubicaciones.count()) === 0) {
+    await db.ubicaciones.bulkAdd([
+      { id: UBICACION_FOODTRUCK, nombre: "Foodtruck", activo: true, sort_order: 1 },
+      { id: UBICACION_LOCAL, nombre: "Local", activo: true, sort_order: 2 },
     ]);
   }
   await setMeta("seeded", "1");

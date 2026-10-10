@@ -23,11 +23,17 @@ const SOLO_ADMIN = new Set([
   "upsert_canal_precio",
   "upsert_promo",
   "delete_promo",
+  "force_close_cash",
 ]);
 
 /**
- * Restricciones dentro de una operación que el empleado sí puede hacer.
+ * Lo que el que atiende no puede hacer, ni siquiera armando la petición a mano.
  * Devuelve el motivo del rechazo, o null si está permitida.
+ *
+ * Acá sólo entran cosas que la app nunca manda para ese rol: un rechazo saca
+ * la operación de la cola (queda en "rechazadas" y en la auditoría), así que
+ * no puede caer sobre algo que el empleado hizo de buena fe — eso se acepta y
+ * se marca para revisar (ver `ajustarPorRol`).
  */
 function vetarPorRol(
   kind: string,
@@ -41,35 +47,79 @@ function vetarPorRol(
     if (tipo === "ajuste") {
       return "Los ajustes de stock los hace el dueño. Registrá una merma con el motivo o hacé un conteo.";
     }
-    if (tipo === "compra" || tipo === "produccion") {
+    if (tipo !== "merma") {
       return "La entrada de mercadería la carga el dueño.";
     }
-    if (tipo === "merma" && !String(p.reason ?? "").trim()) {
-      return "La merma necesita un motivo.";
+    if (!(Number(p.qty) < 0)) return "Una merma resta stock.";
+    if (!String(p.reason ?? "").trim()) return "La merma necesita un motivo.";
+  }
+
+  if (kind === "transfer_stock") {
+    if (!(Number(p.qty) > 0)) return "El traslado necesita una cantidad.";
+    if (!p.desde_id || p.desde_id === p.hacia_id) {
+      return "El traslado tiene que ir de un lugar a otro.";
     }
   }
 
-  if (kind === "customer_payment" && p.type === "ajuste") {
-    return "Los ajustes de cuenta corriente los hace el dueño.";
+  if (kind === "customer_payment") {
+    if (p.type !== "pago") return "Los ajustes de cuenta corriente los hace el dueño.";
+    if (!(Number(p.amount) < 0)) return "Un pago baja la deuda.";
   }
 
+  return null;
+}
+
+/**
+ * Lo que el que atiende hizo y no le corresponde, pero que ya pasó: una venta
+ * cobrada no se rechaza (frenarla no devuelve la plata, sólo la esconde). Se
+ * acepta, se le saca lo que no le toca decidir y queda marcada para el dueño.
+ */
+function ajustarPorRol(
+  kind: string,
+  p: Record<string, unknown>,
+  rol: string
+): { payload: Record<string, unknown>; sospecha?: string } {
+  if (rol === "admin") return { payload: p };
+
   if (kind === "sale") {
-    // El ahorro por tramos y el de las promos los calcula el sistema a partir
-    // de reglas que definió el dueño; un descuento por encima de eso es una
-    // decisión comercial que autoriza el dueño en el momento.
     const desc = Number(p.discount ?? 0);
     const porTramos = Number(p.ahorro_tramos ?? 0);
     const porPromos = Number(p.ahorro_promos ?? 0);
     if (desc - porTramos - porPromos > 0.5) {
-      return "Los descuentos los autoriza el dueño.";
+      return {
+        payload: p,
+        sospecha: `descuento a mano de $${Math.round(desc - porTramos - porPromos)} sin autorización`,
+      };
     }
   }
 
-  if (kind === "expense" && p.new_cost !== "" && p.new_cost != null) {
-    return "Los costos los define el dueño.";
+  if (kind === "expense") {
+    const conStock = p.product_id !== "" && p.product_id != null && Number(p.qty_purchased || 0) > 0;
+    const conCosto = p.new_cost !== "" && p.new_cost != null;
+    if (conStock || conCosto) {
+      // El gasto entra (la plata salió), pero el stock y el costo los carga el dueño
+      return {
+        payload: { ...p, product_id: "", qty_purchased: "", new_cost: "" },
+        sospecha: conStock
+          ? `decía que entraron ${p.qty_purchased} unidades: no se sumaron al stock, cargalas vos si es así`
+          : "intentó cambiar un costo: no se cambió",
+      };
+    }
   }
 
-  return null;
+  return { payload: p };
+}
+
+/** Las cuentas de la venta tienen que cerrar entre sí. */
+function revisarCuentas(p: Record<string, unknown>): string | undefined {
+  const subtotal = Number(p.subtotal ?? 0);
+  const discount = Number(p.discount ?? 0);
+  const total = Number(p.total ?? 0);
+  if (!Number.isFinite(total) || total < 0) return "total inválido";
+  if (Math.abs(subtotal - discount - total) > 1) {
+    return `subtotal $${subtotal} − descuento $${discount} no da el total $${total}`;
+  }
+  return undefined;
 }
 
 interface PromoClaim {
@@ -96,7 +146,7 @@ interface PromoClaim {
 async function vetarPromos(
   supabase: ReturnType<typeof supabaseAdmin>,
   p: Record<string, unknown>
-): Promise<{ error?: string; sospecha?: string }> {
+): Promise<{ sospecha?: string }> {
   const claims = (Array.isArray(p.promos) ? p.promos : []) as PromoClaim[];
   const declarado = Number(p.ahorro_promos ?? 0);
 
@@ -108,7 +158,7 @@ async function vetarPromos(
 
   const suma = claims.reduce((a, c) => a + Number(c.ahorro ?? 0), 0);
   if (Math.abs(suma - declarado) > 1) {
-    return { error: "El descuento de promo no coincide con las promos aplicadas." };
+    return { sospecha: "el descuento de promo no coincide con las promos aplicadas" };
   }
 
   const { data: promos, error } = await supabase
@@ -148,15 +198,15 @@ async function vetarPromos(
     const ahorro = Number(c.ahorro ?? 0);
     const veces = Math.max(1, Number(c.veces ?? 1));
 
-    // Estos sí se rechazan: los números no cierran contra la promo real
+    // Los números no cierran contra la promo real: entra, pero marcada
     if (promo.tipo === "porcentaje") {
       const techo = (Number(promo.valor ?? 0) / 100) * subtotal + 1;
       if (ahorro > techo) {
-        return { error: `La promo "${c.nombre}" descuenta de más.` };
+        sospechas.push(`la promo "${c.nombre}" descuenta de más`);
       }
     } else if (promo.tipo === "monto") {
       if (ahorro > Number(promo.valor ?? 0) + 1) {
-        return { error: `La promo "${c.nombre}" descuenta de más.` };
+        sospechas.push(`la promo "${c.nombre}" descuenta de más`);
       }
     } else {
       // Combo: el pedido tiene que dar para las veces que se declaran
@@ -169,9 +219,7 @@ async function vetarPromos(
       const necesitaEmp = Number(promo.empanadas_qty ?? 0) * veces;
       const necesitaBeb = Number(promo.bebida_qty ?? 1) * veces;
       if (empanadas < necesitaEmp || bebidas < necesitaBeb) {
-        return {
-          error: `La promo "${c.nombre}" se aplicó más veces de las que da el pedido.`,
-        };
+        sospechas.push(`la promo "${c.nombre}" se aplicó más veces de las que da el pedido`);
       }
     }
   }
@@ -192,6 +240,8 @@ const OPERACIONES_UNICAS = new Set([
   "customer_payment",
   "open_cash",
   "close_cash",
+  "force_close_cash",
+  "transfer_stock",
 ]);
 
 async function yaAuditada(
@@ -203,7 +253,14 @@ async function yaAuditada(
   if (!OPERACIONES_UNICAS.has(kind) || id == null || id === "") return false;
   // Una venta puede entrar como "venta" y reintentarse como "venta_a_revisar"
   // (por ejemplo, si la promo se borró en el medio): es la misma venta.
-  const acciones = kind === "sale" ? ["venta", "venta_a_revisar"] : [accion];
+  const acciones =
+    kind === "sale"
+      ? ["venta", "venta_a_revisar"]
+      : kind === "expense"
+        ? ["gasto", "gasto_a_revisar"]
+        : kind === "close_cash"
+          ? ["cierre_caja", "cierre_caja_a_revisar"]
+          : [accion];
   const { data, error } = await supabase
     .from("audit_log")
     .select("id")
@@ -232,10 +289,25 @@ function describir(
       };
     case "close_cash":
       return {
-        accion: "cierre_caja",
+        accion: sospecha ? "cierre_caja_a_revisar" : "cierre_caja",
         entidad: "cash_sessions",
-        resumen: `Cerró la caja · esperado $${n(p.expected_cash) ?? 0}, contado $${n(p.counted_cash) ?? 0}, diferencia $${n(p.difference) ?? 0}`,
+        resumen:
+          `Cerró la caja · esperado $${n(p.expected_cash) ?? 0}, contado $${n(p.counted_cash) ?? 0}, diferencia $${n(p.difference) ?? 0}` +
+          (sospecha ? ` ⚠ REVISAR: ${sospecha}` : ""),
         monto: n(p.difference),
+      };
+    case "force_close_cash":
+      return {
+        accion: "cierre_caja_sin_arqueo",
+        entidad: "cash_sessions",
+        resumen: `Cerró sin arqueo una caja que había quedado abierta${p.note ? ` — ${p.note}` : ""}`,
+      };
+    case "transfer_stock":
+      return {
+        accion: "traslado",
+        entidad: "stock_movements",
+        resumen: `Trasladó ${n(p.qty)} unidades de ${p.desde_nombre ?? "un lugar"} a ${p.hacia_nombre ?? "otro"}${p.reason ? ` — ${p.reason}` : ""}`,
+        unidades: n(p.qty),
       };
     case "sale": {
       const items = Array.isArray(p.items) ? p.items : [];
@@ -261,9 +333,11 @@ function describir(
     }
     case "expense":
       return {
-        accion: "gasto",
+        accion: sospecha ? "gasto_a_revisar" : "gasto",
         entidad: "expenses",
-        resumen: `Registró un gasto de $${n(p.amount) ?? 0}: ${p.description}${p.qty_purchased ? ` (entraron ${n(p.qty_purchased)} unidades)` : ""}`,
+        resumen:
+          `Registró un gasto de $${n(p.amount) ?? 0}: ${p.description}${p.qty_purchased ? ` (entraron ${n(p.qty_purchased)} unidades)` : ""}` +
+          (sospecha ? ` ⚠ REVISAR: ${sospecha}` : ""),
         monto: n(p.amount),
         unidades: n(p.qty_purchased),
       };
@@ -271,7 +345,7 @@ function describir(
       return {
         accion: "conteo",
         entidad: "stock_counts",
-        resumen: `Contó físico: sistema ${n(p.system_qty)}, contado ${n(p.counted_qty)}, diferencia ${n(p.diff)}${p.note ? ` — ${p.note}` : ""}`,
+        resumen: `Contó físico${p.ubicacion_nombre ? ` en ${p.ubicacion_nombre}` : ""}: sistema ${n(p.system_qty)}, contado ${n(p.counted_qty)}, diferencia ${n(p.diff)}${p.note ? ` — ${p.note}` : ""}`,
         unidades: n(p.diff),
       };
     case "stock_move": {
@@ -304,9 +378,26 @@ function describir(
 }
 
 /**
+ * Un rechazo es definitivo cuando reintentar daría lo mismo: la operación no
+ * es válida (rol, datos, integridad). Esas salen de la cola del dispositivo y
+ * quedan registradas; las demás —red, base ocupada— se reintentan.
+ */
+function esDefinitivo(code: string | undefined): boolean {
+  if (!code) return false;
+  // 22: datos inválidos · 23: integridad (FK, único, check) · P0001: raise
+  return code.startsWith("22") || code.startsWith("23") || code === "P0001";
+}
+
+type Resultado = { id: number; ok: boolean; error?: string; definitivo?: boolean };
+
+/**
  * Procesa el outbox del cliente EN ORDEN. Exige sesión: sin usuario válido no
  * se escribe nada. Cada operación queda firmada por su autor y deja rastro.
  * Idempotente por local_uuid: reintentar nunca duplica.
+ *
+ * Una operación rechazada NO frena las que vienen atrás: se informa como
+ * definitiva, queda en la auditoría con todos sus datos y el dispositivo la
+ * aparta. Antes, una sola rechazada trababa la cola entera de ese equipo.
  */
 export async function POST(req: Request) {
   const sesion: Sesion | null = await getSesion();
@@ -333,53 +424,93 @@ export async function POST(req: Request) {
 
   const supabase = supabaseAdmin();
   const dispositivo = req.headers.get("user-agent")?.slice(0, 180) ?? null;
-  const results: { id: number; ok: boolean; error?: string }[] = [];
+  const results: Resultado[] = [];
   const avisos: Aviso[] = [];
 
+  const rechazar = async (op: IncomingOp, motivo: string) => {
+    results.push({ id: op.id, ok: false, error: motivo, definitivo: true });
+    await supabase.rpc("log_audit", {
+      p_user_id: sesion.userId,
+      p_email: sesion.email,
+      p_accion: "operacion_rechazada",
+      p_entidad: "outbox",
+      p_entidad_id: String(op.payload?.id ?? ""),
+      p_resumen: `⚠ No se guardó (${op.kind}): ${motivo}`,
+      p_ocurrido: new Date().toISOString(),
+      p_monto: null,
+      p_unidades: null,
+      p_datos: { kind: op.kind, payload: op.payload },
+      p_dispositivo: dispositivo,
+    });
+  };
+
   for (const op of ops) {
+    if (!op || typeof op.payload !== "object" || op.payload == null) {
+      results.push({ id: op?.id, ok: false, error: "Operación mal formada", definitivo: true });
+      continue;
+    }
     // El rol se valida acá, en el servidor: ocultar el botón no alcanza.
     if (SOLO_ADMIN.has(op.kind) && sesion.rol !== "admin") {
-      results.push({
-        id: op.id,
-        ok: false,
-        error: "Esta operación la realiza el dueño.",
-      });
-      break;
+      await rechazar(op, "Esta operación la realiza el dueño.");
+      continue;
     }
     const veto = vetarPorRol(op.kind, op.payload, sesion.rol);
     if (veto) {
-      results.push({ id: op.id, ok: false, error: veto });
-      break;
+      await rechazar(op, veto);
+      continue;
     }
 
-    // El descuento por promo tiene que apoyarse en una promo real del dueño
-    let sospecha: string | undefined;
+    const ajuste = ajustarPorRol(op.kind, op.payload, sesion.rol);
+    const sospechas: string[] = ajuste.sospecha ? [ajuste.sospecha] : [];
     if (op.kind === "sale") {
-      const revision = await vetarPromos(supabase, op.payload);
-      if (revision.error) {
-        results.push({ id: op.id, ok: false, error: revision.error });
-        break;
-      }
-      sospecha = revision.sospecha;
+      const cuentas = revisarCuentas(ajuste.payload);
+      if (cuentas) sospechas.push(cuentas);
+      // El descuento por promo tiene que apoyarse en una promo real del dueño
+      const revision = await vetarPromos(supabase, ajuste.payload);
+      if (revision.sospecha) sospechas.push(revision.sospecha);
     }
 
-    // La autoría la pone el servidor con la sesión, no el cliente.
+    // La autoría y el rol los pone el servidor con la sesión, no el cliente.
     const payload = {
-      ...op.payload,
+      ...ajuste.payload,
       user_id: sesion.userId,
       actor_email: sesion.email,
+      es_admin: sesion.rol === "admin",
     };
 
-    const { error } = await supabase.rpc("sync_op", {
+    const { data, error } = await supabase.rpc("sync_op", {
       p_kind: op.kind,
       p: payload,
     });
     if (error) {
+      if (esDefinitivo(error.code)) {
+        await rechazar(op, error.message);
+        continue;
+      }
+      // Transitorio: se corta acá y el dispositivo reintenta desde esta
       results.push({ id: op.id, ok: false, error: error.message });
       break;
     }
 
-    const d = describir(op.kind, op.payload, sospecha);
+    // Lo que el servidor calculó por su cuenta pisa lo que dijo el dispositivo
+    const servidor = (data ?? {}) as Record<string, unknown>;
+    const registrado: Record<string, unknown> = { ...ajuste.payload };
+    if (op.kind === "stock_count" && servidor.diff != null) {
+      registrado.system_qty = servidor.system_qty;
+      registrado.diff = servidor.diff;
+    }
+    if (op.kind === "close_cash" && servidor.esperado_servidor != null) {
+      const delDispositivo = Number(ajuste.payload.expected_cash ?? 0);
+      const delServidor = Number(servidor.esperado_servidor);
+      if (Math.abs(delServidor - delDispositivo) > 1) {
+        sospechas.push(
+          `el equipo esperaba $${delDispositivo} y con lo que llegó al servidor da $${delServidor}`
+        );
+      }
+    }
+    const sospecha = sospechas.length > 0 ? sospechas.join("; ") : undefined;
+
+    const d = describir(op.kind, registrado, sospecha);
     // Si se cortó la señal antes de la respuesta, el dispositivo reintenta la
     // tanda entera. sync_op no duplica lo que ya entró; el rastro y los
     // avisos tampoco tienen que hacerlo.
@@ -402,7 +533,7 @@ export async function POST(req: Request) {
           new Date().toISOString(),
         p_monto: d.monto ?? null,
         p_unidades: d.unidades ?? null,
-        p_datos: op.payload,
+        p_datos: registrado,
         p_dispositivo: dispositivo,
       });
     }
@@ -410,7 +541,7 @@ export async function POST(req: Request) {
     results.push({ id: op.id, ok: true });
 
     if (!repetida) {
-      const aviso = avisoPara(op.kind, op.payload, sesion.nombre, sospecha);
+      const aviso = avisoPara(op.kind, registrado, sesion.nombre, sospecha);
       if (aviso) avisos.push(aviso);
     }
   }

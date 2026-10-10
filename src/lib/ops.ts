@@ -1,13 +1,18 @@
 import { db } from "./db";
 import { computeCart } from "./pricing";
+import { moverStock, stockEn, ubicacionDeCanal, UBICACION_FOODTRUCK } from "./lugar";
+import { useSesion } from "@/stores/sesion";
 import type {
   Canal,
   CanalPrecio,
   CashSession,
+  Conciliacion,
   Customer,
   Expense,
   OutboxOp,
   PaymentMethod,
+  Pedido,
+  PedidoEstado,
   Product,
   Promo,
   Sale,
@@ -43,6 +48,7 @@ function op(
     created_at: nowISO(),
     tries: 0,
     last_error: null,
+    autor: useSesion.getState().usuario?.nombre,
   };
 }
 
@@ -59,11 +65,23 @@ export async function getOpenSession(
   canalId?: string | null
 ): Promise<CashSession | undefined> {
   const abiertas = await db.cash_sessions.where("status").equals("abierta").toArray();
+  // Las cajas viejas (sin canal) eran del canal por defecto: valen sólo para
+  // ése. Antes valían para cualquiera y no dejaban abrir la caja del local.
+  const esDefault =
+    canalId != null && ((await db.canales.get(canalId))?.es_default ?? false);
   const propias =
     canalId == null
       ? abiertas
-      : abiertas.filter((s) => s.canal_id === canalId || s.canal_id == null);
+      : abiertas.filter(
+          (s) => s.canal_id === canalId || (s.canal_id == null && esDefault)
+        );
   return propias.sort((a, b) => b.opened_at.localeCompare(a.opened_at))[0];
+}
+
+/** Horas que lleva abierta una caja: más de un turno es una caja olvidada. */
+export const HORAS_CAJA_OLVIDADA = 16;
+export function cajaOlvidada(s: Pick<CashSession, "opened_at">, ahora = Date.now()): boolean {
+  return ahora - new Date(s.opened_at).getTime() > HORAS_CAJA_OLVIDADA * 3600 * 1000;
 }
 
 /** Todas las cajas abiertas, para mostrar una tarjeta por lugar. */
@@ -189,6 +207,8 @@ export async function closeCash(input: {
   note?: string;
   /** efectivo esperado que la UI mostró: si cambió (venta/gasto en el medio), se aborta */
   expected_snapshot?: number;
+  /** QR y posnet: lo que informa Mercado Pago / el posnet contra el sistema */
+  conciliacion?: Conciliacion | null;
 }): Promise<CashSession> {
   const session = input.session_id
     ? await db.cash_sessions.get(input.session_id)
@@ -224,6 +244,7 @@ export async function closeCash(input: {
     difference,
     note: input.note ?? session.note,
     status: "cerrada",
+    conciliacion: input.conciliacion ?? null,
   };
   await db.transaction("rw", db.cash_sessions, db.outbox, async () => {
     await db.cash_sessions.put(closed);
@@ -236,11 +257,66 @@ export async function closeCash(input: {
         expected_cash: closed.expected_cash,
         difference: closed.difference,
         note: input.note ?? null,
+        conciliacion: input.conciliacion ?? null,
       })
     );
   });
   return closed;
 }
+
+/**
+ * Cierra sin arqueo una caja que quedó abierta (de otro día, o de otro
+ * equipo). No se inventa cuánta plata había: queda marcada "sin arqueo" y el
+ * dueño explica en la nota. Sirve aunque la caja no esté en este equipo.
+ */
+export async function forceCloseCash(input: {
+  session_id: string;
+  closed_by: string;
+  note: string;
+}): Promise<void> {
+  const closedAt = nowISO();
+  await db.transaction("rw", [db.cash_sessions, db.meta, db.outbox], async () => {
+    const local = await db.cash_sessions.get(input.session_id);
+    if (local && local.status === "abierta") {
+      await db.cash_sessions.put({
+        ...local,
+        status: "cerrada",
+        closed_at: closedAt,
+        closed_by: input.closed_by,
+        counted_cash: null,
+        expected_cash: null,
+        difference: null,
+        sin_arqueo: true,
+        note: input.note,
+      });
+    }
+    // Que deje de figurar como abierta en otro equipo ya mismo, sin esperar
+    // a la próxima sincronización
+    const fila = await db.meta.get(CLAVE_CAJAS_REMOTAS_OPS);
+    if (fila) {
+      try {
+        const lista = JSON.parse(fila.value) as { local_uuid: string }[];
+        await db.meta.put({
+          key: CLAVE_CAJAS_REMOTAS_OPS,
+          value: JSON.stringify(lista.filter((c) => c.local_uuid !== input.session_id)),
+        });
+      } catch {
+        // la lista se reconstruye en la próxima sincronización
+      }
+    }
+    await db.outbox.add(
+      op("force_close_cash", input.session_id, {
+        id: input.session_id,
+        closed_at: closedAt,
+        closed_by: input.closed_by,
+        note: input.note,
+      })
+    );
+  });
+}
+
+/** Misma clave que usa el motor de sincronización (evita un import circular). */
+const CLAVE_CAJAS_REMOTAS_OPS = "cajas_abiertas_servidor";
 
 // ── VENTA ────────────────────────────────────────────────────────────────────
 
@@ -253,6 +329,11 @@ export async function recordSale(input: {
   sold_by: string;
   note?: string;
   canal_id?: string | null;
+  /**
+   * El total que vio el cliente. Si al registrar da otro (cambió un precio o
+   * venció una promo en el medio), no se cobra algo distinto en silencio.
+   */
+  expected_total?: number;
 }): Promise<Sale> {
   // Mismo conjunto que muestra el POS: solo productos activos.
   const products = (await db.products.toArray()).filter((p) => p.is_active);
@@ -285,6 +366,20 @@ export async function recordSale(input: {
     promos
   );
   if (cart.lines.length === 0) throw new Error("El pedido está vacío.");
+  if (input.expected_total != null && Math.abs(cart.total - input.expected_total) > 0.5) {
+    throw new Error(
+      `El total cambió a ${cart.total} (se actualizó un precio o una promo). Revisá el pedido y volvé a cobrar.`
+    );
+  }
+  if (
+    input.payment_method === "efectivo" &&
+    input.cash_received != null &&
+    input.cash_received > 0 &&
+    input.cash_received < cart.total
+  ) {
+    throw new Error("El efectivo recibido no alcanza para el total.");
+  }
+  const ubicacionId = ubicacionDeCanal(canal);
   if (input.payment_method === "cuenta_corriente" && !input.customer_id) {
     throw new Error("La venta a cuenta corriente necesita un cliente.");
   }
@@ -309,7 +404,7 @@ export async function recordSale(input: {
 
   await db.transaction(
     "rw",
-    [db.sales, db.products, db.stock_movements, db.account_movements, db.outbox],
+    [db.sales, db.products, db.stock_ubic, db.stock_movements, db.account_movements, db.outbox],
     async () => {
       await db.sales.add(sale);
 
@@ -326,13 +421,10 @@ export async function recordSale(input: {
       for (const [productId, unidades] of porProducto) {
         const product = await db.products.get(productId);
         if (!product) continue;
-        const balance = product.current_qty - unidades;
-        await db.products.update(productId, {
-          current_qty: balance,
-          updated_at: sale.sold_at,
-        });
-        await db.stock_movements.add({
-          id: uuid(),
+        const balance = await moverStock(productId, ubicacionId, -unidades, sale.sold_at);
+        // Mismo id que le pone el servidor: al traer el historial no se duplica
+        await db.stock_movements.put({
+          id: `${sale.id}:${productId}`,
           product_id: productId,
           type: "venta",
           qty: -unidades,
@@ -341,17 +433,14 @@ export async function recordSale(input: {
           balance_after: balance,
           moved_at: sale.sold_at,
           created_by: input.sold_by,
+          ubicacion_id: ubicacionId,
         });
       }
 
       if (sale.payment_method === "cuenta_corriente" && sale.customer_id) {
-        const last = await db.account_movements
-          .where("customer_id")
-          .equals(sale.customer_id)
-          .sortBy("moved_at");
-        const balance = (last.at(-1)?.balance_after ?? 0) + sale.total;
+        const balance = (await customerBalance(sale.customer_id)) + sale.total;
         await db.account_movements.add({
-          id: uuid(),
+          id: `cc:${sale.id}`,
           customer_id: sale.customer_id,
           type: "venta",
           amount: sale.total,
@@ -371,6 +460,7 @@ export async function recordSale(input: {
           sold_at: sale.sold_at,
           cash_session_id: sale.cash_session_id,
           canal_id: sale.canal_id ?? "",
+          ubicacion_id: ubicacionId,
           payment_method: sale.payment_method,
           customer_id: sale.customer_id ?? "",
           subtotal: sale.subtotal,
@@ -412,8 +502,11 @@ export async function recordExpense(input: {
   cash_session_id?: string | null;
   /** a quién se le pagó, si es un sueldo o adelanto */
   empleado_id?: string | null;
+  /** a qué lugar entra la mercadería, si es una compra con stock */
+  ubicacion_id?: string | null;
   created_by: string;
 }): Promise<Expense> {
+  const ubicacionId = input.ubicacion_id ?? UBICACION_FOODTRUCK;
   const session = input.cash_session_id
     ? await db.cash_sessions.get(input.cash_session_id)
     : await getOpenSession();
@@ -439,7 +532,7 @@ export async function recordExpense(input: {
 
   await db.transaction(
     "rw",
-    [db.expenses, db.products, db.stock_movements, db.outbox],
+    [db.expenses, db.products, db.stock_ubic, db.stock_movements, db.outbox],
     async () => {
       await db.expenses.add(expense);
 
@@ -447,15 +540,17 @@ export async function recordExpense(input: {
       if (expense.product_id && expense.qty_purchased && expense.qty_purchased > 0) {
         const product = await db.products.get(expense.product_id);
         if (product) {
-          const balance = product.current_qty + expense.qty_purchased;
-          const patch: Partial<Product> = {
-            current_qty: balance,
-            updated_at: expense.spent_at,
-          };
-          if (expense.new_cost != null) patch.cost_per_unit = expense.new_cost;
-          await db.products.update(expense.product_id, patch);
-          await db.stock_movements.add({
-            id: uuid(),
+          const balance = await moverStock(
+            expense.product_id,
+            ubicacionId,
+            expense.qty_purchased,
+            expense.spent_at
+          );
+          if (expense.new_cost != null) {
+            await db.products.update(expense.product_id, { cost_per_unit: expense.new_cost });
+          }
+          await db.stock_movements.put({
+            id: `exp:${expense.id}`,
             product_id: expense.product_id,
             type: "compra",
             qty: expense.qty_purchased,
@@ -464,6 +559,7 @@ export async function recordExpense(input: {
             balance_after: balance,
             moved_at: expense.spent_at,
             created_by: expense.created_by,
+            ubicacion_id: ubicacionId,
           });
         }
       }
@@ -482,6 +578,7 @@ export async function recordExpense(input: {
           new_cost: expense.new_cost ?? "",
           supplier: expense.supplier,
           empleado_id: expense.empleado_id ?? "",
+          ubicacion_id: ubicacionId,
           created_by: expense.created_by,
         })
       );
@@ -492,23 +589,30 @@ export async function recordExpense(input: {
 
 // ── STOCK ────────────────────────────────────────────────────────────────────
 
+/**
+ * Conteo físico en un lugar. El ajuste se calcula contra lo que había EN ESE
+ * LUGAR; el servidor lo vuelve a calcular contra el momento del conteo (si
+ * llega tarde una venta anterior, no se descuenta dos veces).
+ */
 export async function recordCount(input: {
   product_id: string;
   counted_qty: number;
   note?: string;
   counted_by: string;
+  ubicacion_id: string;
+  ubicacion_nombre?: string;
 }) {
   assertFinite(input.counted_qty, "Cantidad contada");
   const product = await db.products.get(input.product_id);
   if (!product) throw new Error("Producto inexistente.");
   const countedAt = nowISO();
-  const systemQty = product.current_qty;
+  const systemQty = await stockEn(input.product_id, input.ubicacion_id);
   const diff = input.counted_qty - systemQty;
   const countId = uuid();
 
   await db.transaction(
     "rw",
-    [db.stock_counts, db.stock_movements, db.products, db.outbox],
+    [db.stock_counts, db.stock_movements, db.products, db.stock_ubic, db.outbox],
     async () => {
       await db.stock_counts.add({
         id: countId,
@@ -519,13 +623,11 @@ export async function recordCount(input: {
         diff,
         note: input.note ?? null,
         counted_by: input.counted_by,
+        ubicacion_id: input.ubicacion_id,
       });
-      await db.products.update(input.product_id, {
-        current_qty: input.counted_qty,
-        updated_at: countedAt,
-      });
-      await db.stock_movements.add({
-        id: uuid(),
+      await moverStock(input.product_id, input.ubicacion_id, diff, countedAt);
+      await db.stock_movements.put({
+        id: `count:${countId}`,
         product_id: input.product_id,
         type: "conteo",
         qty: diff,
@@ -534,6 +636,7 @@ export async function recordCount(input: {
         balance_after: input.counted_qty,
         moved_at: countedAt,
         created_by: input.counted_by,
+        ubicacion_id: input.ubicacion_id,
       });
       await db.outbox.add(
         op("stock_count", countId, {
@@ -545,6 +648,8 @@ export async function recordCount(input: {
           diff,
           note: input.note ?? null,
           counted_by: input.counted_by,
+          ubicacion_id: input.ubicacion_id,
+          ubicacion_nombre: input.ubicacion_nombre ?? "",
         })
       );
     }
@@ -554,11 +659,12 @@ export async function recordCount(input: {
 
 export async function recordStockMove(input: {
   product_id: string;
-  type: Exclude<StockMovementType, "venta" | "conteo">;
+  type: Exclude<StockMovementType, "venta" | "conteo" | "traslado">;
   /** en unidades; el signo lo define el tipo (merma resta, compra suma) */
   qty: number;
   reason: string;
   created_by: string;
+  ubicacion_id: string;
 }) {
   assertFinite(input.qty, "Cantidad");
   const product = await db.products.get(input.product_id);
@@ -566,17 +672,13 @@ export async function recordStockMove(input: {
   const movedAt = nowISO();
   const signedQty =
     input.type === "merma" ? -Math.abs(input.qty) : input.qty;
-  const balance = product.current_qty + signedQty;
   const id = uuid();
 
   await db.transaction(
     "rw",
-    [db.stock_movements, db.products, db.outbox],
+    [db.stock_movements, db.products, db.stock_ubic, db.outbox],
     async () => {
-      await db.products.update(input.product_id, {
-        current_qty: balance,
-        updated_at: movedAt,
-      });
+      const balance = await moverStock(input.product_id, input.ubicacion_id, signedQty, movedAt);
       await db.stock_movements.add({
         id,
         product_id: input.product_id,
@@ -587,6 +689,7 @@ export async function recordStockMove(input: {
         balance_after: balance,
         moved_at: movedAt,
         created_by: input.created_by,
+        ubicacion_id: input.ubicacion_id,
       });
       await db.outbox.add(
         op("stock_move", id, {
@@ -595,6 +698,76 @@ export async function recordStockMove(input: {
           type: input.type,
           qty: signedQty,
           reason: input.reason,
+          moved_at: movedAt,
+          created_by: input.created_by,
+          ubicacion_id: input.ubicacion_id,
+        })
+      );
+    }
+  );
+}
+
+/**
+ * Llevar mercadería de un lugar al otro (del local al foodtruck antes de
+ * salir, por ejemplo). Sale de uno y entra al otro: el total no cambia.
+ */
+export async function transferStock(input: {
+  product_id: string;
+  qty: number;
+  desde_id: string;
+  hacia_id: string;
+  desde_nombre: string;
+  hacia_nombre: string;
+  reason?: string;
+  created_by: string;
+}) {
+  assertFinite(input.qty, "Cantidad");
+  if (input.qty <= 0) throw new Error("La cantidad tiene que ser mayor a cero.");
+  if (input.desde_id === input.hacia_id) throw new Error("Elegí dos lugares distintos.");
+  const product = await db.products.get(input.product_id);
+  if (!product) throw new Error("Producto inexistente.");
+  const movedAt = nowISO();
+  const id = uuid();
+  const reason = input.reason?.trim() || `Traslado ${input.desde_nombre} → ${input.hacia_nombre}`;
+
+  await db.transaction(
+    "rw",
+    [db.stock_movements, db.products, db.stock_ubic, db.outbox],
+    async () => {
+      const saldoDesde = await moverStock(input.product_id, input.desde_id, -input.qty, movedAt);
+      const saldoHacia = await moverStock(input.product_id, input.hacia_id, input.qty, movedAt);
+      const base = {
+        product_id: input.product_id,
+        type: "traslado" as const,
+        reason,
+        ref_id: id,
+        moved_at: movedAt,
+        created_by: input.created_by,
+      };
+      await db.stock_movements.put({
+        ...base,
+        id: `${id}:sale`,
+        qty: -input.qty,
+        balance_after: saldoDesde,
+        ubicacion_id: input.desde_id,
+      });
+      await db.stock_movements.put({
+        ...base,
+        id: `${id}:entra`,
+        qty: input.qty,
+        balance_after: saldoHacia,
+        ubicacion_id: input.hacia_id,
+      });
+      await db.outbox.add(
+        op("transfer_stock", id, {
+          id,
+          product_id: input.product_id,
+          qty: input.qty,
+          desde_id: input.desde_id,
+          hacia_id: input.hacia_id,
+          desde_nombre: input.desde_nombre,
+          hacia_nombre: input.hacia_nombre,
+          reason,
           moved_at: movedAt,
           created_by: input.created_by,
         })
@@ -636,12 +809,16 @@ export async function upsertCustomer(input: {
   return customer;
 }
 
+/**
+ * Saldo de cuenta corriente: la SUMA de los movimientos. No "el último
+ * saldo": un pago hecho sin señal que llega tarde dejaba ese número corrido.
+ */
 export async function customerBalance(customerId: string): Promise<number> {
   const movements = await db.account_movements
     .where("customer_id")
     .equals(customerId)
-    .sortBy("moved_at");
-  return movements.at(-1)?.balance_after ?? 0;
+    .toArray();
+  return movements.reduce((acc, m) => acc + m.amount, 0);
 }
 
 export async function recordCustomerPayment(input: {
@@ -676,11 +853,7 @@ export async function recordCustomerPayment(input: {
     "rw",
     [db.account_movements, db.cash_sessions, db.outbox],
     async () => {
-      const movements = await db.account_movements
-        .where("customer_id")
-        .equals(input.customer_id)
-        .sortBy("moved_at");
-      const balance = (movements.at(-1)?.balance_after ?? 0) + signed;
+      const balance = (await customerBalance(input.customer_id)) + signed;
       await db.account_movements.add({
         id,
         customer_id: input.customer_id,
@@ -762,52 +935,30 @@ export async function createProduct(input: {
 }
 
 /**
- * ¿Este producto se puede borrar de verdad, o sólo desactivar?
- *
- * Si ya se vendió o se movió stock, borrarlo dejaría el histórico mintiendo:
- * ventas apuntando a un producto que no existe. En ese caso se desactiva.
+ * Baja de producto: se archiva, nunca se borra. Otro equipo pudo venderlo sin
+ * señal, y su venta tiene que poder llegar apuntando a algo que existe. Las
+ * promos que lo usaban dejan de aplicarse.
  */
-export async function productoBorrable(id: string): Promise<boolean> {
-  // Alcanza con mirar el ledger: toda venta genera su movimiento de stock, así
-  // que un producto sin movimientos ni conteos nunca se vendió. Recorrer las
-  // ventas además sería leerlas todas para responder lo mismo.
-  const [movimientos, conteos] = await Promise.all([
-    db.stock_movements.where("product_id").equals(id).count(),
-    db.stock_counts.where("product_id").equals(id).count(),
-  ]);
-  return movimientos === 0 && conteos === 0;
-}
-
-/**
- * Baja de producto. El servidor vuelve a decidir con TODO el histórico (el
- * dispositivo sólo conoce lo suyo): si el producto tiene historia lo desactiva
- * en vez de borrarlo. Devuelve qué se hizo localmente.
- */
-export async function deleteProduct(
-  id: string
-): Promise<{ borrado: boolean }> {
-  const borrable = await productoBorrable(id);
-
+export async function deleteProduct(id: string): Promise<void> {
   await db.transaction(
     "rw",
     [db.products, db.canal_precios, db.promos, db.outbox],
     async () => {
-      if (borrable) {
-        await db.products.delete(id);
-        await db.canal_precios.where("product_id").equals(id).delete();
-        const promos = await db.promos.toArray();
-        const afectadas = promos.filter(
-          (p) => p.product_id === id || p.bebida_product_id === id
-        );
-        for (const p of afectadas) await db.promos.delete(p.id);
-      } else {
-        await db.products.update(id, { is_active: false, updated_at: nowISO() });
+      await db.products.update(id, {
+        is_active: false,
+        archivado: true,
+        updated_at: nowISO(),
+      });
+      await db.canal_precios.where("product_id").equals(id).delete();
+      const promos = await db.promos.toArray();
+      for (const p of promos) {
+        if (p.product_id === id || p.bebida_product_id === id) {
+          await db.promos.update(p.id, { activo: false });
+        }
       }
       await db.outbox.add(op("delete_product", id, { id }));
     }
   );
-
-  return { borrado: borrable };
 }
 
 // ── PROMOCIONES ──────────────────────────────────────────────────────────────
@@ -871,6 +1022,7 @@ export async function upsertCanal(input: {
   nombre: string;
   recargo_pct: number;
   activo?: boolean;
+  ubicacion_id?: string | null;
 }): Promise<Canal> {
   const existente = input.id ? await db.canales.get(input.id) : undefined;
   const canal: Canal = {
@@ -879,6 +1031,7 @@ export async function upsertCanal(input: {
     recargo_pct: input.recargo_pct,
     es_default: existente?.es_default ?? false,
     activo: input.activo ?? existente?.activo ?? true,
+    ubicacion_id: input.ubicacion_id ?? existente?.ubicacion_id ?? null,
     sort_order:
       existente?.sort_order ??
       ((await db.canales.orderBy("sort_order").last())?.sort_order ?? 0) + 1,
@@ -893,6 +1046,7 @@ export async function upsertCanal(input: {
         es_default: canal.es_default,
         activo: canal.activo,
         sort_order: canal.sort_order,
+        ubicacion_id: canal.ubicacion_id ?? "",
       })
     );
   });
@@ -970,4 +1124,123 @@ export async function updateProduct(
       })
     );
   });
+}
+
+// ── PEDIDOS PARA LLEVAR / DELIVERY ───────────────────────────────────────────
+
+function pedidoOp(p: Pedido): OutboxOp {
+  return op("upsert_pedido", p.id, {
+    id: p.id,
+    creado_en: p.creado_en,
+    creado_por: p.creado_por,
+    canal_id: p.canal_id ?? "",
+    cliente_nombre: p.cliente_nombre,
+    telefono: p.telefono ?? "",
+    tipo: p.tipo,
+    direccion: p.direccion ?? "",
+    para_cuando: p.para_cuando ?? "",
+    estado: p.estado,
+    cantidades: p.cantidades,
+    lineas: p.lineas,
+    total: p.total,
+    nota: p.nota ?? "",
+    sale_id: p.sale_id ?? "",
+    pagado: p.pagado,
+    cambiado_en: p.cambiado_en,
+  });
+}
+
+/** Toma un pedido. Todavía no es venta: no descuenta stock ni entra en caja. */
+export async function crearPedido(
+  input: Omit<Pedido, "id" | "creado_en" | "estado" | "sale_id" | "pagado" | "cambiado_en">
+): Promise<Pedido> {
+  if (!input.cliente_nombre.trim()) throw new Error("Falta el nombre de quien pide.");
+  if (Object.keys(input.cantidades).length === 0) throw new Error("El pedido está vacío.");
+  const ahora = nowISO();
+  const pedido: Pedido = {
+    ...input,
+    cliente_nombre: input.cliente_nombre.trim(),
+    id: uuid(),
+    creado_en: ahora,
+    estado: "pendiente",
+    sale_id: null,
+    pagado: false,
+    cambiado_en: ahora,
+  };
+  await db.transaction("rw", db.pedidos, db.outbox, async () => {
+    await db.pedidos.put(pedido);
+    await db.outbox.add(pedidoOp(pedido));
+  });
+  return pedido;
+}
+
+export async function actualizarPedido(
+  id: string,
+  patch: Partial<Pick<Pedido, "estado" | "sale_id" | "pagado" | "nota" | "para_cuando">>
+): Promise<Pedido> {
+  let actualizado: Pedido | null = null;
+  await db.transaction("rw", db.pedidos, db.outbox, async () => {
+    const actual = await db.pedidos.get(id);
+    if (!actual) throw new Error("No se encontró el pedido.");
+    actualizado = { ...actual, ...patch, cambiado_en: nowISO() };
+    await db.pedidos.put(actualizado);
+    await db.outbox.add(pedidoOp(actualizado));
+  });
+  return actualizado!;
+}
+
+/**
+ * Cobra un pedido: recién ahí es una venta (descuenta stock y entra en la
+ * caja de su canal). La venta va primero en la cola, así el servidor ya la
+ * tiene cuando llega el pedido que la nombra.
+ */
+export async function cobrarPedido(input: {
+  pedido_id: string;
+  payment_method: PaymentMethod;
+  cash_received?: number;
+  customer_id?: string;
+  sold_by: string;
+  expected_total?: number;
+  /** al cobrarlo también se entrega (lo vinieron a buscar) */
+  entregar?: boolean;
+}): Promise<{ sale: Sale; pedido: Pedido }> {
+  // Todo junto o nada: si la venta se guardara y el pedido no, reintentar lo
+  // cobraría dos veces.
+  return db.transaction(
+    "rw",
+    [
+      db.pedidos,
+      db.sales,
+      db.products,
+      db.stock_ubic,
+      db.stock_movements,
+      db.account_movements,
+      db.cash_sessions,
+      db.canales,
+      db.canal_precios,
+      db.promos,
+      db.outbox,
+    ],
+    async () => {
+      const pedido = await db.pedidos.get(input.pedido_id);
+      if (!pedido) throw new Error("No se encontró el pedido.");
+      if (pedido.pagado) throw new Error("Este pedido ya está cobrado.");
+      const sale = await recordSale({
+        quantities: pedido.cantidades,
+        payment_method: input.payment_method,
+        customer_id: input.customer_id,
+        cash_received: input.cash_received,
+        sold_by: input.sold_by,
+        note: `Pedido de ${pedido.cliente_nombre}${pedido.tipo === "delivery" ? " (delivery)" : ""}`,
+        canal_id: pedido.canal_id,
+        expected_total: input.expected_total,
+      });
+      const actualizado = await actualizarPedido(pedido.id, {
+        sale_id: sale.id,
+        pagado: true,
+        ...(input.entregar ? { estado: "entregado" as PedidoEstado } : {}),
+      });
+      return { sale, pedido: actualizado };
+    }
+  );
 }

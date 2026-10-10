@@ -10,9 +10,11 @@ import {
   Wrench,
   ClipboardCheck,
   Flame,
+  ArrowRightLeft,
 } from "lucide-react";
 import { db } from "@/lib/db";
 import { formatUnits } from "@/lib/money";
+import { UBICACION_FOODTRUCK } from "@/lib/lugar";
 import { PageHeader } from "@/components/shell/AppShell";
 import { EmptyState } from "@/components/ui/EmptyState";
 import type { StockMovementType } from "@/types";
@@ -27,6 +29,7 @@ const typeMeta: Record<
   ajuste: { label: "Ajuste", icon: Wrench, tone: "text-info-600" },
   produccion: { label: "Producción", icon: Flame, tone: "text-success-600" },
   conteo: { label: "Conteo físico", icon: ClipboardCheck, tone: "text-brand-900" },
+  traslado: { label: "Traslado", icon: ArrowRightLeft, tone: "text-info-600" },
 };
 
 const dateFmt = new Intl.DateTimeFormat("es-AR", {
@@ -41,6 +44,9 @@ function MovimientosContent() {
   const productFilter = params.get("p");
 
   const products = useLiveQuery(() => db.products.toArray(), []);
+  const ubicaciones = useLiveQuery(() => db.ubicaciones.toArray(), []);
+  const lugarDe = (id: string | null | undefined) =>
+    (ubicaciones ?? []).find((u) => u.id === (id ?? UBICACION_FOODTRUCK))?.nombre ?? "";
   const movements = useLiveQuery(async () => {
     if (productFilter) {
       const rows = await db.stock_movements
@@ -94,6 +100,7 @@ function MovimientosContent() {
                       <span className="font-normal text-ink-700"> · {meta.label}</span>
                     </p>
                     <p className="text-xs text-ink-500">
+                      {(ubicaciones ?? []).length > 1 ? `${lugarDe(m.ubicacion_id)} · ` : ""}
                       {dateFmt.format(new Date(m.moved_at))}
                       {m.created_by ? ` · ${m.created_by}` : ""}
                       {m.reason && m.reason !== meta.label ? ` · ${m.reason}` : ""}
@@ -108,7 +115,9 @@ function MovimientosContent() {
                       {m.qty > 0 ? `+${formatUnits(m.qty)}` : formatUnits(m.qty)}
                     </p>
                     <p className="text-xs text-ink-500">
-                      saldo {formatUnits(m.balance_after)}
+                      {m.absorbido
+                        ? "ya lo midió un conteo posterior"
+                        : `saldo ${formatUnits(m.balance_after)}`}
                     </p>
                   </div>
                 </li>

@@ -7,7 +7,6 @@ import { db } from "@/lib/db";
 import {
   createProduct,
   deleteProduct,
-  productoBorrable,
   setCanalPrecio,
   updateProduct,
   upsertCanal,
@@ -38,8 +37,10 @@ export default function ConfiguracionPage() {
   const [editing, setEditing] = useState<Product | null>(null);
   const [creando, setCreando] = useState(false);
 
+  // Los archivados no vuelven: siguen en la base para que las ventas viejas
+  // se entiendan, pero no se administran más
   const products = useLiveQuery(
-    () => db.products.orderBy("sort_order").toArray(),
+    () => db.products.orderBy("sort_order").filter((p) => !p.archivado).toArray(),
     []
   );
   const canalesTodos = useLiveQuery(
@@ -241,6 +242,7 @@ function Canales({
             es_default: false,
             activo: true,
             sort_order: 0,
+            ubicacion_id: null,
           })
         }
       >
@@ -273,16 +275,20 @@ function EditarCanalSheet({
 }) {
   const [nombre, setNombre] = useState<string | null>(null);
   const [recargo, setRecargo] = useState<string | null>(null);
+  const [lugar, setLugar] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const ubicaciones = useLiveQuery(() => db.ubicaciones.orderBy("sort_order").toArray(), []);
   if (!canal) return null;
 
   const esNuevo = canal.id === "";
   const n = nombre ?? canal.nombre;
   const r = recargo ?? String(canal.recargo_pct);
+  const u = lugar ?? canal.ubicacion_id ?? (ubicaciones ?? []).at(-1)?.id ?? null;
 
   const close = () => {
     setNombre(null);
     setRecargo(null);
+    setLugar(null);
     onClose();
   };
 
@@ -320,6 +326,34 @@ function EditarCanalSheet({
             este es el porcentaje que sube el precio de lista.
           </p>
         </div>
+        {(ubicaciones ?? []).length > 1 ? (
+          <div>
+            <p className="mb-1 text-xs font-bold uppercase tracking-wide text-ink-700">
+              ¿De dónde sale la mercadería?
+            </p>
+            <div className="flex gap-2" role="radiogroup" aria-label="Lugar del canal">
+              {(ubicaciones ?? []).map((x) => (
+                <button
+                  key={x.id}
+                  type="button"
+                  role="radio"
+                  aria-checked={u === x.id}
+                  onClick={() => setLugar(x.id)}
+                  className={`h-11 flex-1 rounded-xl text-sm font-bold ${
+                    u === x.id
+                      ? "bg-brand-900 text-ink-inverse"
+                      : "border border-[var(--border-soft)] bg-surface-card text-ink-700"
+                  }`}
+                >
+                  {x.nombre}
+                </button>
+              ))}
+            </div>
+            <p className="mt-1 text-xs text-ink-500">
+              Lo que se vende por este canal descuenta del stock de ese lugar.
+            </p>
+          </div>
+        ) : null}
 
         {!canal.es_default ? (
           <Button
@@ -351,6 +385,7 @@ function EditarCanalSheet({
                 id: canal.id || undefined,
                 nombre: n,
                 recargo_pct: Number(r) || 0,
+                ubicacion_id: u,
               });
               notifyOutboxChanged();
               showToast(esNuevo ? `Canal ${n} creado` : `${n} actualizado`);
@@ -695,13 +730,6 @@ function EditProductSheet({
   const [minRaw, setMinRaw] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  // Un producto que ya se vendió no se puede borrar sin romper el histórico:
-  // el botón dice de antemano qué va a pasar, en vez de avisar después.
-  const borrable = useLiveQuery(
-    async () => (product ? productoBorrable(product.id) : false),
-    [product?.id]
-  );
-
   if (!product) return null;
 
   const val = (local: string | null, saved: number | null) =>
@@ -814,19 +842,13 @@ function EditProductSheet({
           className="text-danger-600"
           disabled={busy}
           onClick={async () => {
-            const aviso = borrable
-              ? `¿Eliminar "${product.name}" del catálogo? Nunca se vendió ni se le movió stock, así que se borra del todo.`
-              : `"${product.name}" ya tiene ventas o movimientos de stock. Si lo eliminás, se saca del catálogo pero se conserva el histórico para que las ventas viejas se sigan entendiendo. ¿Seguimos?`;
+            const aviso = `¿Sacar "${product.name}" del catálogo? Deja de aparecer en todos lados; las ventas viejas lo siguen mostrando.`;
             if (!window.confirm(aviso)) return;
             setBusy(true);
             try {
-              const { borrado } = await deleteProduct(product.id);
+              await deleteProduct(product.id);
               notifyOutboxChanged();
-              showToast(
-                borrado
-                  ? `${product.name} eliminado del catálogo`
-                  : `${product.name} salió del catálogo; el histórico queda`
-              );
+              showToast(`${product.name} salió del catálogo`);
               close();
             } finally {
               setBusy(false);
@@ -834,7 +856,7 @@ function EditProductSheet({
           }}
         >
           <Trash2 size={16} />
-          {borrable ? "Eliminar producto" : "Eliminar (conserva el histórico)"}
+          Eliminar producto
         </Button>
       </div>
     </Sheet>

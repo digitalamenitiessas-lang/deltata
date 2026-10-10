@@ -32,7 +32,12 @@ export default function ClientesPage() {
   const info = useMemo(() => {
     const map = new Map<string, { balance: number; lastAt: string | null }>();
     for (const m of movements ?? []) {
-      map.set(m.customer_id, { balance: m.balance_after, lastAt: m.moved_at });
+      // saldo = suma de movimientos (un pago que llegó tarde no lo deja corrido)
+      const prev = map.get(m.customer_id);
+      map.set(m.customer_id, {
+        balance: (prev?.balance ?? 0) + m.amount,
+        lastAt: m.moved_at,
+      });
     }
     return map;
   }, [movements]);

@@ -28,10 +28,27 @@ const METHODS: { id: PaymentMethod; icon: typeof Banknote }[] = [
   { id: "cuenta_corriente", icon: NotebookPen },
 ];
 
+/**
+ * Billetes con los que suele pagar alguien, por encima del total: tocar uno
+ * es más rápido que tipear el monto y el vuelto sale solo.
+ */
+export function montosRapidos(total: number): number[] {
+  if (total <= 0) return [];
+  const pasos = [1000, 2000, 5000, 10000, 20000];
+  const vistos = new Set<number>();
+  for (const paso of pasos) {
+    const m = Math.ceil(total / paso) * paso;
+    if (m > total) vistos.add(m);
+  }
+  return [...vistos].sort((a, b) => a - b).slice(0, 3);
+}
+
 interface Props {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   total: number;
+  /** título del sheet (por ejemplo, "Cobrar pedido de Juan") */
+  titulo?: string;
   /** cliente que ya se eligió al armar el pedido */
   clientePreelegido?: string | null;
   onConfirm: (input: {
@@ -47,6 +64,7 @@ export function PaymentSheet({
   total,
   clientePreelegido = null,
   onConfirm,
+  titulo = "Cobrar",
 }: Props) {
   const [method, setMethod] = useState<PaymentMethod>("efectivo");
   const [receivedRaw, setReceivedRaw] = useState("");
@@ -75,10 +93,10 @@ export function PaymentSheet({
   );
 
   const balances = useMemo(() => {
-    // movements viene ordenado por fecha: el último balance_after manda
+    // El saldo es la suma: un pago que llegó tarde no lo deja corrido
     const map = new Map<string, number>();
     for (const m of movements ?? []) {
-      map.set(m.customer_id, m.balance_after);
+      map.set(m.customer_id, (map.get(m.customer_id) ?? 0) + m.amount);
     }
     return map;
   }, [movements]);
@@ -102,9 +120,13 @@ export function PaymentSheet({
     )
     .slice(0, 6);
 
+  // Con el monto cargado, tiene que alcanzar: si no, la venta quedaría como
+  // cobrada completa con plata de menos en el cajón.
+  const faltaEfectivo = method === "efectivo" && received > 0 && received < total;
   const canConfirm =
     total > 0 &&
     !busy &&
+    !faltaEfectivo &&
     (method !== "cuenta_corriente" || customerId != null);
 
   const confirm = async () => {
@@ -133,7 +155,7 @@ export function PaymentSheet({
   };
 
   return (
-    <Sheet open={open} onOpenChange={onOpenChange} title="Cobrar">
+    <Sheet open={open} onOpenChange={onOpenChange} title={titulo}>
       <div className="flex flex-col gap-4">
         <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="Medio de pago">
           {METHODS.map(({ id, icon: Icon }) => (
@@ -157,6 +179,25 @@ export function PaymentSheet({
 
         {method === "efectivo" ? (
           <div className="flex flex-col gap-2">
+            <div className="grid grid-cols-4 gap-2">
+              <button
+                type="button"
+                onClick={() => setReceivedRaw(String(total))}
+                className="h-12 rounded-xl border border-[var(--border-strong)] bg-surface-card text-sm font-bold text-ink-950 active:bg-cream-100"
+              >
+                Justo
+              </button>
+              {montosRapidos(total).map((m) => (
+                <button
+                  key={m}
+                  type="button"
+                  onClick={() => setReceivedRaw(String(m))}
+                  className="tnum h-12 rounded-xl border border-[var(--border-strong)] bg-surface-card text-sm font-bold text-ink-950 active:bg-cream-100"
+                >
+                  {formatARS(m)}
+                </button>
+              ))}
+            </div>
             <MoneyInput
               label="Monto recibido (opcional)"
               value={receivedRaw}
@@ -176,6 +217,19 @@ export function PaymentSheet({
               </p>
             ) : null}
           </div>
+        ) : null}
+
+        {method === "qr" ? (
+          <p className="rounded-2xl bg-cream-100 px-3 py-2 text-xs leading-relaxed text-ink-700">
+            Mostrá el QR de Mercado Pago y confirmá recién cuando veas el pago
+            acreditado. Al cerrar la caja se compara con el resumen de Mercado Pago.
+          </p>
+        ) : null}
+        {method === "tarjeta" ? (
+          <p className="rounded-2xl bg-cream-100 px-3 py-2 text-xs leading-relaxed text-ink-700">
+            Pasá la tarjeta por el posnet y confirmá con el ticket aprobado. Al
+            cerrar la caja se compara con el cierre del posnet.
+          </p>
         ) : null}
 
         {method === "cuenta_corriente" ? (

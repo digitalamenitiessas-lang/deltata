@@ -3,9 +3,12 @@
 import { useMemo, useState } from "react";
 import Link from "next/link";
 import { useLiveQuery } from "dexie-react-hooks";
-import { ClipboardList, History } from "lucide-react";
+import { ArrowRightLeft, ClipboardList, History } from "lucide-react";
 import { db } from "@/lib/db";
-import { recordStockMove, updateProduct } from "@/lib/ops";
+import { recordStockMove, transferStock, updateProduct } from "@/lib/ops";
+import { UBICACION_FOODTRUCK } from "@/lib/lugar";
+import { useEquipo } from "@/stores/equipo";
+import { LugarTabs } from "@/components/stock/LugarTabs";
 import { notifyOutboxChanged } from "@/lib/sync/engine";
 import { formatARS, formatUnits } from "@/lib/money";
 import { stockState, STOCK_STATE_LABELS, type StockState } from "@/lib/stock-state";
@@ -16,7 +19,7 @@ import { Badge, type BadgeTone } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Sheet } from "@/components/ui/Sheet";
 import { MoneyInput, parseMoney } from "@/components/ui/MoneyInput";
-import type { Product } from "@/types";
+import type { Product, Ubicacion } from "@/types";
 
 const stateTones: Record<StockState, BadgeTone> = {
   negativo: "danger",
@@ -38,31 +41,63 @@ export default function StockPage() {
   const showToast = useUI((s) => s.showToast);
   const [filter, setFilter] = useState<Filter>("todos");
   const [selected, setSelected] = useState<Product | null>(null);
+  const ubicacionEquipo = useEquipo((s) => s.ubicacionId);
+  // undefined = todavía no se tocó: arranca en el lugar de este equipo
+  const [lugarElegido, setLugarElegido] = useState<string | null | undefined>(undefined);
+  const ubicaciones = useLiveQuery(() => db.ubicaciones.orderBy("sort_order").toArray(), []);
+  const lugar: string | null =
+    lugarElegido !== undefined ? lugarElegido : (ubicacionEquipo ?? UBICACION_FOODTRUCK);
+  const porLugar = useLiveQuery(
+    async () =>
+      lugar
+        ? new Map(
+            (await db.stock_ubic.where("ubicacion_id").equals(lugar).toArray()).map((r) => [
+              r.product_id,
+              r.qty,
+            ])
+          )
+        : null,
+    [lugar]
+  );
+  const qtyDe = (p: Product) => (porLugar ? (porLugar.get(p.id) ?? 0) : p.current_qty);
+  const nombreLugar = (ubicaciones ?? []).find((u) => u.id === lugar)?.nombre ?? null;
 
   const products = useLiveQuery(
     () => db.products.orderBy("sort_order").toArray(),
     []
   );
   const trackedIds = useLiveQuery(async () => {
-    const [movKeys, countKeys] = await Promise.all([
+    // stock_ubic tiene una fila por cada producto que alguna vez se movió
+    // (viene del servidor con TODA la historia; el historial local es parcial)
+    const [movKeys, countKeys, lugarKeys] = await Promise.all([
       db.stock_movements.orderBy("product_id").uniqueKeys(),
       db.stock_counts.orderBy("product_id").uniqueKeys(),
+      db.stock_ubic.orderBy("product_id").uniqueKeys(),
     ]);
-    return new Set([...movKeys, ...countKeys].map(String));
+    return new Set([...movKeys, ...countKeys, ...lugarKeys].map(String));
   }, []);
   const lastCount = useLiveQuery(
-    () => db.stock_counts.orderBy("counted_at").last(),
-    []
+    async () => {
+      const todos = await db.stock_counts.orderBy("counted_at").reverse().toArray();
+      return lugar
+        ? todos.find((c) => (c.ubicacion_id ?? UBICACION_FOODTRUCK) === lugar)
+        : todos[0];
+    },
+    [lugar]
   );
 
   const rows = useMemo(() => {
     return (products ?? [])
       .filter((p) => p.is_active)
-      .map((p) => ({
-        product: p,
-        state: stockState(p, trackedIds?.has(p.id) ?? false),
-      }));
-  }, [products, trackedIds]);
+      .map((p) => {
+        const qty = porLugar ? (porLugar.get(p.id) ?? 0) : p.current_qty;
+        return {
+          product: p,
+          qty,
+          state: stockState(p, trackedIds?.has(p.id) ?? false, qty),
+        };
+      });
+  }, [products, trackedIds, porLugar]);
 
   const visible = rows.filter(({ product, state }) => {
     if (filter === "todos") return true;
@@ -75,7 +110,7 @@ export default function StockPage() {
 
   const totalUnits = rows
     .filter((r) => r.state !== "nunca_contado")
-    .reduce((acc, r) => acc + Math.max(0, r.product.current_qty), 0);
+    .reduce((acc, r) => acc + Math.max(0, r.qty), 0);
   const criticalCount = rows.filter(
     (r) => r.state === "critico" || r.state === "negativo"
   ).length;
@@ -85,7 +120,7 @@ export default function StockPage() {
   const productsWithCost = rows.filter((r) => r.product.cost_per_unit != null);
   const missingCost = rows.length - productsWithCost.length;
   const stockValue = productsWithCost.reduce(
-    (acc, r) => acc + Math.max(0, r.product.current_qty) * (r.product.cost_per_unit ?? 0),
+    (acc, r) => acc + Math.max(0, r.qty) * (r.product.cost_per_unit ?? 0),
     0
   );
 
@@ -102,6 +137,15 @@ export default function StockPage() {
         }
       />
       <div className="flex flex-col gap-4 p-4">
+        <LugarTabs
+          ubicaciones={ubicaciones ?? []}
+          valor={lugar}
+          onChange={setLugarElegido}
+          conTotal={admin}
+        />
+        {/* El que atiende cuenta a ciegas: si viera el número del sistema, el
+            conteo podría "coincidir" sin que nadie cuente de verdad. */}
+        {admin ? (
         <section className="grid grid-cols-2 gap-2">
           <div className="rounded-2xl border border-[var(--border-soft)] bg-surface-card p-3">
             <p className="text-xs text-ink-700">Unidades en stock</p>
@@ -146,10 +190,12 @@ export default function StockPage() {
             </p>
           </div>
         </section>
+        ) : null}
 
-        <Link href="/stock/conteo">
+        <Link href={lugar ? `/stock/conteo?lugar=${lugar}` : "/stock/conteo"}>
           <Button size="lg" className="w-full">
             <ClipboardList size={18} /> Hacer conteo físico
+            {nombreLugar ? ` · ${nombreLugar}` : ""}
           </Button>
         </Link>
 
@@ -179,7 +225,7 @@ export default function StockPage() {
         </div>
 
         <ul className="flex flex-col gap-2">
-          {visible.map(({ product, state }) => (
+          {visible.map(({ product, state, qty }) => (
             <li key={product.id}>
               <button
                 type="button"
@@ -190,20 +236,24 @@ export default function StockPage() {
                   <p className="truncate text-sm font-bold text-ink-950">
                     {product.name}
                   </p>
-                  <p className="text-xs text-ink-700">
-                    {product.min_qty != null
-                      ? `Mínimo ${formatUnits(product.min_qty)}`
-                      : "Sin mínimo definido"}
-                    {" · "}
-                    {product.cost_per_unit != null
-                      ? `Costo ${formatARS(product.cost_per_unit)}`
-                      : "Costo no cargado"}
-                  </p>
+                  {admin ? (
+                    <p className="text-xs text-ink-700">
+                      {product.min_qty != null
+                        ? `Mínimo ${formatUnits(product.min_qty)}`
+                        : "Sin mínimo definido"}
+                      {" · "}
+                      {product.cost_per_unit != null
+                        ? `Costo ${formatARS(product.cost_per_unit)}`
+                        : "Costo no cargado"}
+                    </p>
+                  ) : null}
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
-                  <span className="tnum text-xl font-bold text-ink-950">
-                    {state === "nunca_contado" ? "—" : formatUnits(product.current_qty)}
-                  </span>
+                  {admin ? (
+                    <span className="tnum text-xl font-bold text-ink-950">
+                      {state === "nunca_contado" ? "—" : formatUnits(qty)}
+                    </span>
+                  ) : null}
                   <Badge tone={stateTones[state]}>{STOCK_STATE_LABELS[state]}</Badge>
                 </div>
               </button>
@@ -218,6 +268,9 @@ export default function StockPage() {
         profileName={profileName}
         showToast={showToast}
         admin={admin}
+        lugar={lugar}
+        qty={selected ? qtyDe(selected) : 0}
+        ubicaciones={ubicaciones ?? []}
       />
     </>
   );
@@ -229,14 +282,24 @@ function ProductSheet({
   profileName,
   showToast,
   admin,
+  lugar,
+  qty: qtyLugar,
+  ubicaciones,
 }: {
   product: Product | null;
   onClose: () => void;
   profileName: string;
   showToast: (m: string) => void;
   admin: boolean;
+  /** dónde ocurre el movimiento; null = vista "Total" (no se mueve nada ahí) */
+  lugar: string | null;
+  qty: number;
+  ubicaciones: Ubicacion[];
 }) {
-  const [mode, setMode] = useState<"menu" | "compra" | "merma" | "ajuste" | "minimo">("menu");
+  const [mode, setMode] = useState<
+    "menu" | "compra" | "merma" | "ajuste" | "minimo" | "traslado"
+  >("menu");
+  const [destino, setDestino] = useState<string | null>(null);
   const [qtyRaw, setQtyRaw] = useState("");
   const [reason, setReason] = useState("");
   const [minRaw, setMinRaw] = useState("");
@@ -247,9 +310,13 @@ function ProductSheet({
     setQtyRaw("");
     setReason("");
     setMinRaw("");
+    setDestino(null);
     setBusy(false);
     onClose();
   };
+  const nombreDe = (id: string | null) => ubicaciones.find((u) => u.id === id)?.nombre ?? "";
+  const otros = ubicaciones.filter((u) => u.activo && u.id !== lugar);
+  const hacia = destino ?? otros[0]?.id ?? null;
 
   if (!product) return null;
   const qty = Number(qtyRaw.replace(/[^\d]/g, "")) || 0;
@@ -257,10 +324,11 @@ function ProductSheet({
   const adjustValid = /^-?\d+$/.test(qtyRaw) && Number(qtyRaw) !== 0;
 
   const submitMove = async (type: "compra" | "merma" | "ajuste", signedQty: number) => {
-    if (busy) return;
+    if (busy || !lugar) return;
     setBusy(true);
     try {
       await recordStockMove({
+        ubicacion_id: lugar,
         product_id: product.id,
         type,
         qty: signedQty,
@@ -290,13 +358,24 @@ function ProductSheet({
 
   return (
     <Sheet open={product != null} onOpenChange={(o) => !o && close()} title={product.name}>
-      {mode === "menu" ? (
+      {mode === "menu" && !lugar ? (
+        <p className="rounded-2xl bg-cream-100 px-3 py-3 text-sm text-ink-700">
+          Total en todos los lugares:{" "}
+          <span className="tnum font-bold text-ink-950">{formatUnits(qtyLugar)}</span>.
+          Para registrar una entrada, una merma o un traslado, elegí primero el
+          lugar arriba.
+        </p>
+      ) : mode === "menu" ? (
         <div className="flex flex-col gap-2">
-          <p className="tnum text-sm text-ink-700">
-            Stock teórico:{" "}
-            <span className="font-bold text-ink-950">{formatUnits(product.current_qty)}</span>
-            {product.min_qty != null ? ` · Mínimo: ${formatUnits(product.min_qty)}` : ""}
-          </p>
+          {admin ? (
+            <p className="tnum text-sm text-ink-700">
+              Stock teórico en {nombreDe(lugar)}:{" "}
+              <span className="font-bold text-ink-950">{formatUnits(qtyLugar)}</span>
+              {product.min_qty != null ? ` · Mínimo: ${formatUnits(product.min_qty)}` : ""}
+            </p>
+          ) : (
+            <p className="text-sm text-ink-700">En {nombreDe(lugar)}</p>
+          )}
           {admin ? (
             <Button variant="secondary" size="lg" onClick={() => setMode("compra")}>
               Entrada de mercadería
@@ -305,6 +384,11 @@ function ProductSheet({
           <Button variant="secondary" size="lg" onClick={() => setMode("merma")}>
             Registrar merma
           </Button>
+          {otros.length > 0 ? (
+            <Button variant="secondary" size="lg" onClick={() => setMode("traslado")}>
+              <ArrowRightLeft size={16} /> Llevar a otro lugar
+            </Button>
+          ) : null}
           {admin ? (
             <>
               <Button variant="secondary" size="lg" onClick={() => setMode("ajuste")}>
@@ -368,6 +452,86 @@ function ProductSheet({
           >
             Guardar mínimo
           </Button>
+        </div>
+      ) : mode === "traslado" ? (
+        <div className="flex flex-col gap-3">
+          <p className="text-sm text-ink-700">
+            Sale de <span className="font-bold text-ink-950">{nombreDe(lugar)}</span> y
+            entra en el lugar que elijas. El total no cambia.
+          </p>
+          {otros.length > 1 ? (
+            <div className="flex gap-2" role="radiogroup" aria-label="Destino">
+              {otros.map((u) => (
+                <button
+                  key={u.id}
+                  type="button"
+                  role="radio"
+                  aria-checked={hacia === u.id}
+                  onClick={() => setDestino(u.id)}
+                  className={`h-11 flex-1 rounded-xl text-sm font-bold ${
+                    hacia === u.id
+                      ? "bg-brand-900 text-ink-inverse"
+                      : "border border-[var(--border-soft)] bg-surface-card text-ink-700"
+                  }`}
+                >
+                  {u.nombre}
+                </button>
+              ))}
+            </div>
+          ) : (
+            <p className="text-sm font-bold text-ink-950">Hacia: {nombreDe(hacia)}</p>
+          )}
+          <div>
+            <label className="mb-1 block text-xs font-bold uppercase tracking-wide text-ink-700">
+              Cantidad (unidades)
+            </label>
+            <input
+              type="text"
+              inputMode="numeric"
+              value={qtyRaw}
+              onChange={(e) => setQtyRaw(e.target.value.replace(/[^\d]/g, ""))}
+              autoFocus
+              className="tnum h-14 w-full rounded-2xl border border-[var(--border-strong)] bg-surface-elevated px-4 text-2xl font-bold outline-none focus:border-brand-700"
+            />
+          </div>
+          <div className="flex gap-2">
+            <Button variant="ghost" onClick={() => setMode("menu")}>
+              Volver
+            </Button>
+            <Button
+              size="lg"
+              className="flex-1"
+              disabled={busy || qty <= 0 || !hacia || !lugar}
+              onClick={async () => {
+                if (busy || !lugar || !hacia) return;
+                setBusy(true);
+                try {
+                  await transferStock({
+                    product_id: product.id,
+                    qty,
+                    desde_id: lugar,
+                    hacia_id: hacia,
+                    desde_nombre: nombreDe(lugar),
+                    hacia_nombre: nombreDe(hacia),
+                    reason: reason || undefined,
+                    created_by: profileName,
+                  });
+                  notifyOutboxChanged();
+                  showToast(`${qty} ${product.name} → ${nombreDe(hacia)}`);
+                  close();
+                } catch (err) {
+                  setBusy(false);
+                  showToast(
+                    err instanceof Error && err.message
+                      ? `No se registró: ${err.message}`
+                      : "No se registró el traslado. Reintentá."
+                  );
+                }
+              }}
+            >
+              Registrar traslado
+            </Button>
+          </div>
         </div>
       ) : (
         <div className="flex flex-col gap-3">

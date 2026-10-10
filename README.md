@@ -42,9 +42,22 @@ SUPABASE_SERVICE_ROLE_KEY=...
 Migraciones SQL en `supabase/migrations/` (aplicadas al proyecto
 `rjqvpbdoqozvtlgoezpt`).
 
+## Local + foodtruck (desde 2026-10)
+
+- **Lugares (`ubicaciones`)**: Local y Foodtruck tienen stock propio
+  (`stock_ubicacion`). Cada canal dice de qué lugar sale la mercadería; cada
+  equipo se ubica en un lugar (Más → "¿Dónde está este equipo?").
+- **Conteos que no se pisan**: el ajuste se calcula contra el momento del
+  conteo. Una venta offline anterior que llega después queda "absorbida".
+- **Cola que no se traba**: una operación rechazada (rol, datos) sale a
+  "rechazadas" y a la Auditoría; las ventas nunca se rechazan, se marcan.
+- **Historial de todos los equipos**: `/api/historial` (incremental).
+- **Pedidos** para llevar y delivery (`/pedidos`), y conciliación de QR y
+  posnet al cerrar la caja.
+
 ## Pendientes conocidos
 
-- Autenticación real (hoy: perfil local nombre + rol, sin validación server).
 - Precios del seed son de referencia: ajustarlos en **Configuración**.
+- Notificaciones push: faltan las claves VAPID en Vercel (Production).
 - Lotes/vencimientos, anomalías avanzadas y capa de IA: fases siguientes del
   roadmap (los datos ya quedan registrados para alimentarlas).

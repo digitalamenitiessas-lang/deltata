@@ -1,14 +1,17 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { useRouter } from "next/navigation";
+import { Suspense, useEffect, useMemo, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useLiveQuery } from "dexie-react-hooks";
 import { Check } from "lucide-react";
 import { db } from "@/lib/db";
 import { recordCount } from "@/lib/ops";
+import { stockEn, UBICACION_FOODTRUCK } from "@/lib/lugar";
+import { useEquipo } from "@/stores/equipo";
+import { LugarTabs } from "@/components/stock/LugarTabs";
 import { notifyOutboxChanged } from "@/lib/sync/engine";
 import { formatARS, formatUnits } from "@/lib/money";
-import { useSesion } from "@/stores/sesion";
+import { useSesion, esAdmin } from "@/stores/sesion";
 import { useUI } from "@/stores/ui";
 import { PageHeader } from "@/components/shell/AppShell";
 import { Button } from "@/components/ui/Button";
@@ -17,6 +20,10 @@ import type { Product } from "@/types";
 
 // Conteo a ciegas: NUNCA se muestra el stock teórico antes de registrar el
 // físico. Cada conteo se guarda al confirmarse: pausar no pierde nada.
+//
+// Para el que atiende es ciego de verdad: no ve la diferencia ni puede
+// "corregir el número" después de verla (era la forma de tapar un faltante).
+// El dueño sí ve el resultado. Se cuenta un lugar por vez.
 
 const NOTE_THRESHOLD = 5; // unidades de diferencia que exigen nota
 
@@ -29,8 +36,24 @@ interface CountResult {
 }
 
 export default function ConteoPage() {
+  return (
+    <Suspense fallback={<PageHeader title="Conteo físico" />}>
+      <Conteo />
+    </Suspense>
+  );
+}
+
+function Conteo() {
   const router = useRouter();
-  const profileName = useSesion((s) => s.usuario?.nombre ?? "");
+  const params = useSearchParams();
+  const usuario = useSesion((s) => s.usuario);
+  const profileName = usuario?.nombre ?? "";
+  const admin = esAdmin(usuario);
+  const ubicacionEquipo = useEquipo((s) => s.ubicacionId);
+  const [lugarElegido, setLugarElegido] = useState<string | null>(null);
+  const lugar = lugarElegido ?? params.get("lugar") ?? ubicacionEquipo ?? UBICACION_FOODTRUCK;
+  const ubicaciones = useLiveQuery(() => db.ubicaciones.orderBy("sort_order").toArray(), []);
+  const nombreLugar = (ubicaciones ?? []).find((u) => u.id === lugar)?.nombre ?? "";
   const showToast = useUI((s) => s.showToast);
   const setHideNav = useUI((s) => s.setHideNav);
 
@@ -58,8 +81,30 @@ export default function ConteoPage() {
       .where("counted_at")
       .aboveOrEqual(start.toISOString())
       .toArray();
-    return new Set(rows.map((r) => r.product_id));
-  }, []);
+    return new Set(
+      rows
+        .filter((r) => (r.ubicacion_id ?? UBICACION_FOODTRUCK) === lugar)
+        .map((r) => r.product_id)
+    );
+  }, [lugar]);
+
+  const guardar = async (r: CountResult) => {
+    await recordCount({
+      product_id: r.product.id,
+      counted_qty: r.counted,
+      note: note || undefined,
+      counted_by: profileName,
+      ubicacion_id: lugar,
+      ubicacion_nombre: nombreLugar,
+    });
+    notifyOutboxChanged();
+    setSessionResults((prev) => [...prev, r]);
+    setPendingResult(null);
+    setNote("");
+    setCountedRaw("");
+    setActive(null);
+    showToast(`Conteo guardado: ${r.product.name}`);
+  };
 
   const activeProducts = useMemo(
     () => (products ?? []).filter((p) => p.is_active),
@@ -140,19 +185,7 @@ export default function ConteoPage() {
             onClick={async () => {
               setBusy(true);
               try {
-                await recordCount({
-                  product_id: r.product.id,
-                  counted_qty: r.counted,
-                  note: note || undefined,
-                  counted_by: profileName,
-                });
-                notifyOutboxChanged();
-                setSessionResults((prev) => [...prev, r]);
-                setPendingResult(null);
-                setNote("");
-                setCountedRaw("");
-                setActive(null);
-                showToast(`Conteo guardado: ${r.product.name}`);
+                await guardar(r);
               } catch (err) {
                 showToast(
                   err instanceof Error && err.message
@@ -184,10 +217,16 @@ export default function ConteoPage() {
   if (active) {
     return (
       <>
-        <PageHeader title="Conteo físico" subtitle={`${doneCount} de ${activeProducts.length} contados hoy`} />
+        <PageHeader
+          title="Conteo físico"
+          subtitle={`${nombreLugar} · ${doneCount} de ${activeProducts.length} contados hoy`}
+        />
         <div className="mx-auto flex max-w-md flex-col gap-4 p-4">
           <div className="rounded-3xl border border-[var(--border-soft)] bg-surface-card p-5 text-center">
             <p className="text-lg font-bold text-ink-950">{active.name}</p>
+            <p className="text-xs font-bold uppercase tracking-wide text-ink-500">
+              en {nombreLugar}
+            </p>
             <p className="mt-1 text-sm text-ink-700">
               ¿Cuántas unidades hay físicamente?
             </p>
@@ -203,21 +242,38 @@ export default function ConteoPage() {
           </div>
           <Button
             size="lg"
-            disabled={countedRaw === ""}
-            onClick={() => {
-              const system = active.current_qty;
+            disabled={countedRaw === "" || busy}
+            onClick={async () => {
+              const system = await stockEn(active.id, lugar);
               const diff = counted - system;
-              setPendingResult({
+              const resultado: CountResult = {
                 product: active,
                 system,
                 counted,
                 diff,
                 impact:
                   active.cost_per_unit != null ? diff * active.cost_per_unit : null,
-              });
+              };
+              if (admin) {
+                setPendingResult(resultado);
+                return;
+              }
+              // El que atiende: se guarda tal cual lo contó, sin ver el sistema
+              setBusy(true);
+              try {
+                await guardar(resultado);
+              } catch (err) {
+                showToast(
+                  err instanceof Error && err.message
+                    ? `No se guardó el conteo: ${err.message}`
+                    : "No se guardó el conteo. Reintentá."
+                );
+              } finally {
+                setBusy(false);
+              }
             }}
           >
-            Confirmar conteo
+            {admin ? "Confirmar conteo" : busy ? "Guardando…" : "Guardar conteo"}
           </Button>
           <Button
             variant="ghost"
@@ -238,12 +294,18 @@ export default function ConteoPage() {
     <>
       <PageHeader
         title="Conteo físico"
-        subtitle={`${doneCount} de ${activeProducts.length} contados hoy`}
+        subtitle={`${nombreLugar} · ${doneCount} de ${activeProducts.length} contados hoy`}
       />
       <div className="flex flex-col gap-3 p-4">
+        <LugarTabs
+          ubicaciones={ubicaciones ?? []}
+          valor={lugar}
+          onChange={(id) => id && setLugarElegido(id)}
+        />
         <p className="text-sm text-ink-700">
-          Elegí un producto y contá lo físico. El sistema no te muestra el
-          teórico hasta que confirmes — así el conteo vale.
+          {admin
+            ? "Elegí un producto y contá lo físico. El sistema no te muestra el teórico hasta que confirmes — así el conteo vale."
+            : "Elegí un producto y contá lo que hay físicamente en este lugar. Anotá el número real: las diferencias las revisa el dueño."}
         </p>
         <ul className="flex flex-col gap-2">
           {activeProducts.map((p) => {
@@ -269,7 +331,7 @@ export default function ConteoPage() {
           })}
         </ul>
 
-        {sessionResults.length > 0 ? (
+        {admin && sessionResults.length > 0 ? (
           <section className="rounded-3xl border border-[var(--border-soft)] bg-surface-card p-4">
             <h2 className="mb-2 text-xs font-bold uppercase tracking-wide text-ink-500">
               Diferencias de esta sesión

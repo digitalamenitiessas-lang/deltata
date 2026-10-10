@@ -20,6 +20,8 @@ interface Props {
   qty: number;
   presentacion: Presentacion;
   everTracked: boolean;
+  /** lo que hay en el lugar de este canal; sin esto, el total */
+  stockQty?: number;
   onAdd: () => void;
   onRemove: () => void;
   onQuickQty: () => void;
@@ -34,11 +36,12 @@ export function ProductCard({
   qty,
   presentacion,
   everTracked,
+  stockQty,
   onAdd,
   onRemove,
   onQuickQty,
 }: Props) {
-  const stock = saleCardStockLabel(product, everTracked);
+  const stock = saleCardStockLabel(product, everTracked, stockQty);
   const longPress = useRef<ReturnType<typeof setTimeout> | null>(null);
   const firedLong = useRef(false);
   const congelada = presentacion === "congelada";

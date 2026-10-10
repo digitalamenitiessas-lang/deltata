@@ -1,9 +1,10 @@
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 
+// (Next 16: "middleware" pasó a llamarse "proxy".)
 // Refresca el token en cada navegación para que la sesión no expire mientras
 // se está trabajando, y deja las cookies listas para los route handlers.
-export async function middleware(request: NextRequest) {
+export async function proxy(request: NextRequest) {
   let response = NextResponse.next({ request });
 
   const supabase = createServerClient(

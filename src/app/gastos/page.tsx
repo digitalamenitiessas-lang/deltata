@@ -7,7 +7,9 @@ import { db } from "@/lib/db";
 import { recordExpense, getOpenSessions } from "@/lib/ops";
 import { notifyOutboxChanged } from "@/lib/sync/engine";
 import { formatARS } from "@/lib/money";
-import { useSesion } from "@/stores/sesion";
+import { useSesion, esAdmin } from "@/stores/sesion";
+import { useEquipo } from "@/stores/equipo";
+import { ubicacionDeCanal } from "@/lib/lugar";
 import { useUI } from "@/stores/ui";
 import { PageHeader } from "@/components/shell/AppShell";
 import { Button } from "@/components/ui/Button";
@@ -134,6 +136,11 @@ function NewExpenseSheet({
   const [empleadoId, setEmpleadoId] = useState("");
   const [cajaId, setCajaId] = useState("");
   const [busy, setBusy] = useState(false);
+  // La entrada de mercadería y el costo los carga el dueño: un gasto con
+  // "entraron 60" puede tapar un faltante. El que atiende anota el gasto y
+  // nada más (el servidor igual lo controla).
+  const admin = esAdmin(useSesion((s) => s.usuario));
+  const ubicacionEquipo = useEquipo((s) => s.ubicacionId);
 
   const products = useLiveQuery(() => db.products.orderBy("sort_order").toArray(), []);
   const empleados = useLiveQuery(() => db.empleados.orderBy("nombre").toArray(), []);
@@ -142,17 +149,26 @@ function NewExpenseSheet({
   const cajas = useLiveQuery(() => getOpenSessions(), []);
   const canales = useLiveQuery(() => db.canales.toArray(), []);
   const hasOpenSession = (cajas ?? []).length > 0;
+  // Sin elegir: la caja del lugar donde está este equipo
   const cajaElegida =
-    (cajas ?? []).find((c) => c.id === cajaId) ?? (cajas ?? [])[0] ?? null;
+    (cajas ?? []).find((c) => c.id === cajaId) ??
+    (cajas ?? []).find(
+      (c) =>
+        ubicacionEquipo != null &&
+        ubicacionDeCanal((canales ?? []).find((x) => x.id === c.canal_id)) === ubicacionEquipo
+    ) ??
+    (cajas ?? [])[0] ??
+    null;
   const nombreCanal = (id: string | null) =>
     (canales ?? []).find((c) => c.id === id)?.nombre ?? "Caja";
 
   const amount = parseMoney(amountRaw);
   const qty = Number(qtyRaw.replace(/[^\d]/g, "")) || 0;
   const isMerchandise = category === "mercaderia";
+  const conStock = isMerchandise && admin;
   const esSueldo = category === "sueldos";
   const newUnitCost =
-    isMerchandise && productId && qty > 0 && amount > 0
+    conStock && productId && qty > 0 && amount > 0
       ? Math.round((amount / qty) * 100) / 100
       : null;
 
@@ -174,8 +190,9 @@ function NewExpenseSheet({
         description: description.trim(),
         amount,
         payment_method: method,
-        product_id: isMerchandise && productId ? productId : undefined,
-        qty_purchased: isMerchandise && productId && qty > 0 ? qty : undefined,
+        product_id: conStock && productId ? productId : undefined,
+        qty_purchased: conStock && productId && qty > 0 ? qty : undefined,
+        ubicacion_id: ubicacionEquipo,
         new_cost: updateCost && newUnitCost != null ? newUnitCost : null,
         supplier: supplier.trim() || undefined,
         empleado_id: esSueldo && empleadoId ? empleadoId : null,
@@ -315,7 +332,7 @@ function NewExpenseSheet({
           </div>
         ) : null}
 
-        {isMerchandise ? (
+        {conStock ? (
           <div className="flex flex-col gap-2 rounded-2xl border border-[var(--border-soft)] bg-cream-100 p-3">
             <p className="text-xs font-bold uppercase tracking-wide text-ink-700">
               ¿Entra stock? (opcional)
@@ -328,7 +345,7 @@ function NewExpenseSheet({
             >
               <option value="">Sin producto asociado</option>
               {(products ?? [])
-                .filter((p) => p.is_active)
+                .filter((p) => p.is_active && !p.archivado)
                 .map((p) => (
                   <option key={p.id} value={p.id}>
                     {p.name}
